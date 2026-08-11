@@ -154,6 +154,12 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    environment:
+      <<: *airflow-env
+      # Airflow fixes the task graph when it parses the file, so the phase is
+      # a parse-time decision. Set here and on the dag-processor only, and only
+      # when the kafka profile supplies a broker to produce to.
+      PIPELINE_KAFKA_ENABLED: ${PIPELINE_KAFKA_ENABLED:-false}
     depends_on:
       airflow-db:
         condition: service_healthy
@@ -166,6 +172,9 @@ services:
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
+    environment:
+      <<: *airflow-env
+      PIPELINE_KAFKA_ENABLED: ${PIPELINE_KAFKA_ENABLED:-false}
     restart: unless-stopped
 
   # --- phase 2: kafka ----------------------------------------------------

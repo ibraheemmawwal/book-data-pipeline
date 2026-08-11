@@ -13,6 +13,13 @@ travel between tasks; books do not. XCom lives in the metadata database, and a
 run pushing 6,000 books through it would be writing the catalogue twice, into
 the wrong database, in a format nothing can query.
 
+**The graph has two shapes.** In phase 1 the DAG loads the catalogue itself. In
+phase 2 it resolves candidates onto ``books.raw``, emits the run boundary, and
+finishes — transform and load become long-running consumers. That is a
+deliberate narrowing of Airflow's responsibility, so a slow load stops blocking
+ingestion instead of holding a task open for hours. Which shape is built is
+decided when this file is parsed, because that is when Airflow fixes the graph.
+
 **One source failing must not fail the run.** Provider outages are expected —
 Goodreads is an unofficial contract and the documented APIs have quotas — so
 resolution records per-source outcomes and returns them. ``assess_extraction``
@@ -22,6 +29,7 @@ only task that can fail the run for a data reason.
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from typing import Any
 
@@ -29,6 +37,11 @@ import pendulum
 from airflow.sdk import dag, task
 
 DAG_ID = "book_ingestion"
+
+# Which shape the graph takes is a parse-time decision, not a runtime one:
+# Airflow builds the task graph when it reads this file, so the phases cannot
+# be chosen per run. Compose sets this on the kafka profile and nowhere else.
+KAFKA_MODE = os.environ.get("PIPELINE_KAFKA_ENABLED", "false").lower() == "true"
 
 # The default applies to finite orchestration tasks. Resolution overrides it:
 # Goodreads permits one in-flight request and a resolved candidate can need
@@ -111,6 +124,51 @@ def book_ingestion() -> None:
             "discovered": discovery["candidates"],
         }
 
+    @task(execution_timeout=RESOLVE_EXECUTION_TIMEOUT)
+    def resolve_and_produce(discovery: dict[str, Any]) -> dict[str, Any]:
+        """Resolve candidates onto books.raw and stop there.
+
+        Phase 2's extract stage. Canonicalisation and loading belong to the
+        consumers now, so this task finishes when the events are on the topic
+        rather than when the catalogue is written.
+        """
+        from pipeline.config import Settings
+        from pipeline.ingest import run_resolution_to_sink
+        from pipeline.messaging.kafka import KafkaSink
+
+        settings = Settings()
+        sink = KafkaSink(settings.kafka_bootstrap_servers, settings.kafka_raw_topic)
+        report = run_resolution_to_sink(settings, sink)
+        return {
+            "candidates": report.candidates,
+            "resolved": report.resolved,
+            "unresolved": report.unresolved,
+            "observations": report.observations,
+            "rejected": report.rejected,
+            "books_inserted": 0,
+            "books_updated": 0,
+            "books_unchanged": 0,
+            "status": report.status,
+            "run_id": str(report.run_id),
+            "discovered": discovery["candidates"],
+        }
+
+    @task
+    def emit_run_boundary(outcome: dict[str, Any]) -> dict[str, Any]:
+        """Freeze the topology and write one marker per raw partition.
+
+        The handover. After this the DAG is done and the consumers carry the
+        run; without it they would process every event and never learn the run
+        had ended.
+        """
+        from uuid import UUID
+
+        from pipeline.config import Settings
+        from pipeline.services import emit_run_boundary as emit
+
+        partitions = emit(Settings(), UUID(outcome["run_id"]))
+        return {**outcome, "partitions": partitions}
+
     @task
     def assess_extraction(discovery: dict[str, Any], outcome: dict[str, Any]) -> str:
         """Decide whether the run produced a usable catalogue.
@@ -154,9 +212,18 @@ def book_ingestion() -> None:
         return {"status": status, **outcome}
 
     discovery = discover_candidates()
-    outcome = resolve_and_load(discovery)
-    status = assess_extraction(discovery, outcome)
-    finalise_run(status, outcome)
+
+    if KAFKA_MODE:
+        outcome = resolve_and_produce(discovery)
+        status = assess_extraction(discovery, outcome)
+        # The boundary is emitted only after the run is judged worth
+        # continuing: closing a topic for a run that resolved nothing would
+        # hand the consumers an empty run to finalise.
+        emit_run_boundary(outcome).set_upstream(status)
+    else:
+        outcome = resolve_and_load(discovery)
+        status = assess_extraction(discovery, outcome)
+        finalise_run(status, outcome)
 
 
 book_ingestion()

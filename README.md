@@ -56,6 +56,25 @@ running; putting the catalogue in there would couple a data migration to an
 Airflow upgrade and hand the scheduler write access to the thing it is meant to
 be orchestrating.
 
+### Phase 2: Kafka
+
+```bash
+PIPELINE_KAFKA_ENABLED=true docker compose --profile kafka up -d
+```
+
+The DAG's job narrows: it resolves candidates onto `books.raw`, emits the run
+boundary and finishes. Transform and load become long-running consumers, so a
+slow load no longer holds an Airflow task open for hours.
+
+Which graph Airflow builds is decided when it parses the DAG file, because that
+is when the task graph is fixed — a run cannot choose a phase. The flag is set
+on the kafka profile and nowhere else, so a default clone always gets phase 1.
+
+Delivery is at-least-once with effectively-once database effects. Offsets are
+committed only after the database transaction, so a crash between them replays
+the record; the load layer keys on `(source, source_id)` and compares a content
+hash, so replaying changes nothing.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). Python 3.12 is installed by uv itself.
