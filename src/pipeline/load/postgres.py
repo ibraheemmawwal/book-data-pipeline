@@ -53,6 +53,7 @@ from pipeline.transform import (
     normalise_subject,
     payload_hash,
 )
+from pipeline.transform.identity import ISBN_PREFIX
 from pipeline.transform.series import series_search_text
 
 logger = structlog.get_logger(__name__)
@@ -71,6 +72,7 @@ CANONICAL_FIELDS = (
     "publisher",
     "page_count",
     "download_count",
+    "goodreads_average_rating",
     "language",
     "description",
     "cover_url",
@@ -612,10 +614,15 @@ def _agree_on_identity(candidates: list[CleanBook], identity_key: str) -> list[C
     what caused the merge — and ``merge_candidates`` refuses to span identities
     by design. The stored row is the arbiter.
     """
+    # CleanBook requires identity_key and isbn13 to agree, so they move
+    # together; the source's own view survives in its raw_payload.
+    target_isbn = (
+        identity_key.removeprefix(ISBN_PREFIX) if identity_key.startswith(ISBN_PREFIX) else None
+    )
     return [
         candidate
         if candidate.identity_key == identity_key
-        else candidate.model_copy(update={"identity_key": identity_key})
+        else candidate.model_copy(update={"identity_key": identity_key, "isbn13": target_isbn})
         for candidate in candidates
     ]
 

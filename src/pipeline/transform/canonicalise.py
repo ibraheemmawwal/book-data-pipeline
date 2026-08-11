@@ -257,3 +257,48 @@ def merge_candidates(
             "series": list(richest_series.series),
         }
     )
+
+
+def unify_identity(candidates: list[CleanBook]) -> list[CleanBook]:
+    """Put several observations of one candidate onto a single identity.
+
+    The resolver knows a Goodreads record and an Open Library record describe
+    the same candidate; the load layer does not, because it only sees
+    independent ``CleanBook`` values and merges by ``identity_key``. Without
+    this, a book resolved by two sources becomes two canonical rows — 50
+    candidates produced 92 books in a live run before it existed.
+
+    The strongest identity wins: an ISBN key if any observation has one,
+    otherwise the fallback key of the most complete record. Each observation
+    keeps its own ``source`` and ``source_id``, so they still contribute
+    separate provenance rows to the same book.
+
+    Raises:
+        ValueError: two observations carry different ISBNs. That is not one
+            book seen twice, and forcing them together would fuse a pair that
+            nothing could separate again.
+    """
+    if not candidates:
+        return []
+
+    isbns = {c.isbn13 for c in candidates if c.isbn13}
+    if len(isbns) > 1:
+        msg = f"observations disagree on ISBN: {sorted(isbns)}"
+        raise ValueError(msg)
+
+    if isbns:
+        target = f"{ISBN_PREFIX}{next(iter(isbns))}"
+    else:
+        target = min(candidates, key=_rank).identity_key
+
+    # identity_key and isbn13 are both canonical-identity facts and CleanBook
+    # requires them to agree, so they move together. What each source actually
+    # reported is still in its raw_payload, and the loader recomputes canonical
+    # fields from those regardless.
+    target_isbn = target.removeprefix(ISBN_PREFIX) if target.startswith(ISBN_PREFIX) else None
+    return [
+        candidate
+        if candidate.identity_key == target
+        else candidate.model_copy(update={"identity_key": target, "isbn13": target_isbn})
+        for candidate in candidates
+    ]
