@@ -13,6 +13,7 @@ counts, and stable work and author keys.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from itertools import zip_longest
 from typing import Any
@@ -148,6 +149,56 @@ class OpenLibraryExtractor:
         return map_payload(payload)
 
 
+# "by Frank Herbert" / "par Quelqu'un" — the preposition is noise once the
+# name is used as a search term. Matched on a word boundary rather than a
+# trailing space, so a statement of just "by" reduces to nothing instead of
+# yielding an author named "by".
+_BY_PREFIX = re.compile(r"^(?:by|par|von|de)\b[\s.]*", re.IGNORECASE)
+
+
+def _dump_or_search(doc: dict[str, Any], search_field: str, *dump_fields: str) -> list[Any]:
+    """Read a list field under whichever name this document uses.
+
+    Open Library speaks two shapes and they share almost no field names: search
+    returns ``isbn`` / ``first_publish_year`` / ``publisher``, while a dump
+    edition returns ``isbn_13`` / ``publish_date`` / ``publishers``. Reading one
+    shape against the other silently produced title-only books — 5,891 of them
+    in an end-to-end run, with no ISBN, year or author between them.
+    """
+    if search_field in doc:
+        # Present but the wrong type is malformed, not a cue to look elsewhere:
+        # falling through would turn a broken record into a silently thinner
+        # one. string_list raises for us.
+        primary = string_list(doc, search_field)
+        if primary:
+            return list(primary)
+
+    values: list[Any] = []
+    for field in dump_fields:
+        found = doc.get(field)
+        if isinstance(found, list):
+            values.extend(found)
+        elif found is not None:
+            values.append(found)
+    return values
+
+
+def author_names_from_by_statement(document: dict[str, Any]) -> list[str]:
+    """Recover author names from a dump record's ``by_statement``.
+
+    Dump editions carry author *keys*, not names, and search documents carry
+    ``author_name``. A record from the dump therefore has no name anywhere
+    except here — reading only the search shape silently dropped every author
+    the dump supplied.
+    """
+    statement = document.get("by_statement")
+    if not isinstance(statement, str):
+        return []
+
+    name = _BY_PREFIX.sub("", statement.strip()).strip().rstrip(".").strip()
+    return [name] if name else []
+
+
 def _to_authors(doc: dict[str, Any]) -> list[RawAuthor]:
     """Zip the parallel name and key arrays.
 
@@ -156,7 +207,10 @@ def _to_authors(doc: dict[str, Any]) -> list[RawAuthor]:
     longer array wins and missing keys become None rather than shifting
     everything by one.
     """
-    names = string_list(doc, "author_name")
+    # Search documents carry author_name; dump editions carry only author keys
+    # plus by_statement. Reading one shape silently dropped every author the
+    # other supplied.
+    names = string_list(doc, "author_name") or author_names_from_by_statement(doc)
     keys = string_list(doc, "author_key")
     return [
         RawAuthor(name=name, source_author_id=key) for name, key in zip_longest(names, keys) if name
@@ -165,6 +219,31 @@ def _to_authors(doc: dict[str, Any]) -> list[RawAuthor]:
 
 def _first_non_empty(values: list[str]) -> str | None:
     return next((value for value in values if value.strip()), None)
+
+
+def _strings(values: list[Any]) -> list[str]:
+    return [value for value in values if isinstance(value, str) and value.strip()]
+
+
+def _text_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _language_codes(doc: dict[str, Any]) -> list[str]:
+    """Language codes from either shape.
+
+    Search returns ``language: ["eng"]``; a dump edition returns
+    ``languages: [{"key": "/languages/eng"}]``.
+    """
+    plain = string_list(doc, "language")
+    if plain:
+        return plain
+
+    codes = []
+    for entry in doc.get("languages") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("key"), str):
+            codes.append(entry["key"].rsplit("/", 1)[-1])
+    return codes
 
 
 def _year_as_text(year: object) -> str | None:
@@ -197,12 +276,16 @@ def map_payload(payload: object) -> ExtractedItem:
             title=doc.get("title"),  # type: ignore[arg-type]
             subtitle=doc.get("subtitle"),
             authors=_to_authors(doc),
-            subjects=string_list(doc, "subject")[:50],
-            isbns=string_list(doc, "isbn"),
-            languages=string_list(doc, "language"),
-            published=_year_as_text(doc.get("first_publish_year")),
-            publisher=_first_non_empty(string_list(doc, "publisher")),
-            page_count=doc.get("number_of_pages_median"),
+            subjects=_strings(_dump_or_search(doc, "subject", "subjects"))[:50],
+            isbns=_strings(_dump_or_search(doc, "isbn", "isbn_13", "isbn_10")),
+            languages=_language_codes(doc),
+            # A search document gives a work's first year as an integer; a dump
+            # edition gives that edition's publish_date as free text. Both go
+            # to transform's parse_year rather than being parsed twice here.
+            published=_year_as_text(doc.get("first_publish_year"))
+            or _text_or_none(doc.get("publish_date")),
+            publisher=_first_non_empty(_strings(_dump_or_search(doc, "publisher", "publishers"))),
+            page_count=doc.get("number_of_pages_median") or doc.get("number_of_pages"),
             cover_url=COVER_URL.format(cover_id=cover_id) if cover_id else None,
             raw_payload=doc,
         )

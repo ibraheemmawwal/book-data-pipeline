@@ -51,6 +51,7 @@ from pipeline.extract.base import (
 from pipeline.extract.goodreads_parsers import (
     clean_html_text,
     is_placeholder_cover,
+    parse_aria_series,
     parse_book_detail,
     parse_first_edition,
     parse_series_from_title,
@@ -459,10 +460,21 @@ def _candidate_to_raw_book(candidate: dict[str, Any]) -> ExtractedItem:
                 )
             )
 
+        # Enrichment is replayed, not re-fetched. The load layer rebuilds
+        # canonical fields from stored payloads, so anything the detail pages
+        # contributed must be reconstructible from what was saved — otherwise a
+        # confirmed series quietly downgrades to an inferred one on re-ingest.
+        detail = _stored_block(candidate, "_detail")
+        edition = _stored_block(candidate, "_edition")
+        series = _replayed_series(detail) or series
+
         return RawBook(
             source=SOURCE,
             source_id=book_id,  # type: ignore[arg-type]
             title=bare,
+            isbns=[edition["isbn13"]] if isinstance(edition.get("isbn13"), str) else [],
+            published=edition.get("published"),
+            publisher=edition.get("publisher"),
             authors=authors,
             description=clean_html_text(description),
             page_count=candidate.get("numPages") or None,
@@ -498,3 +510,33 @@ def map_payload(payload: object) -> ExtractedItem:
             detail=f"expected an object, got {type(payload).__name__}",
         )
     return _candidate_to_raw_book(payload)
+
+
+def _stored_block(candidate: dict[str, Any], field: str) -> dict[str, Any]:
+    """An enrichment block saved by ``_enrich``, or an empty mapping."""
+    block = candidate.get(field)
+    return block if isinstance(block, dict) else {}
+
+
+def _replayed_series(detail: dict[str, Any]) -> list[RawSeriesMembership]:
+    """Rebuild a series relationship from a stored detail block.
+
+    The ARIA label and the confirmed series id are what the detail page
+    contributed; without replaying them, a re-ingest would downgrade an
+    evidenced relationship back to an inferred one.
+    """
+    label = detail.get("series_label")
+    parsed = parse_aria_series(label if isinstance(label, str) else None)
+    if parsed is None:
+        return []
+
+    name, position = parsed
+    series_id = detail.get("series_id")
+    return [
+        RawSeriesMembership(
+            name=name,
+            source_series_id=series_id if isinstance(series_id, str) else None,
+            position=str(position) if position is not None else None,
+            confirmed=isinstance(series_id, str) and bool(series_id),
+        )
+    ]

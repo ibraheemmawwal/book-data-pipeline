@@ -589,3 +589,67 @@ class TestEnrichment:
             await extractor.resolve(client, "A Game of Thrones")
 
         assert book_route.call_count == 1
+
+
+class TestEnrichmentReplay:
+    """Stored enrichment has to survive a recompute.
+
+    The load layer rebuilds canonical fields by replaying stored payloads
+    through the source mapper. Anything the detail pages contributed that the
+    mapper cannot read back is silently lost on the next ingest — a confirmed
+    series would quietly downgrade to an inferred one.
+    """
+
+    def test_a_stored_detail_block_rebuilds_the_series(self) -> None:
+        book = map_payload(
+            {
+                "bookId": "13496",
+                "title": "A Game of Thrones",
+                "_detail": {
+                    "series_label": "Book 1 in the A Song of Ice and Fire series",
+                    "series_id": "45175",
+                },
+            }
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.series[0].name == "A Song of Ice and Fire"
+        assert book.series[0].source_series_id == "45175"
+        assert book.series[0].confirmed is True
+
+    def test_a_detail_block_without_an_id_stays_unconfirmed(self) -> None:
+        book = map_payload(
+            {
+                "bookId": "1",
+                "title": "X",
+                "_detail": {"series_label": "Book 2 in the Discworld series"},
+            }
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.series[0].confirmed is False
+
+    def test_a_stored_edition_block_rebuilds_the_isbn(self) -> None:
+        book = map_payload(
+            {
+                "bookId": "1",
+                "title": "X",
+                "_edition": {
+                    "isbn13": "9780553381689",
+                    "published": "August 4, 1997",
+                    "publisher": "Bantam Books",
+                },
+            }
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.isbns == ["9780553381689"]
+        assert book.published == "August 4, 1997"
+        assert book.publisher == "Bantam Books"
+
+    def test_a_payload_with_no_enrichment_is_unaffected(self) -> None:
+        book = map_payload(load("goodreads_autocomplete.json")[0])
+
+        assert isinstance(book, RawBook)
+        assert book.series[0].confirmed is False
+        assert book.isbns == []
