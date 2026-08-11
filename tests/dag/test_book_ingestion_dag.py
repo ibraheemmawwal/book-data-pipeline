@@ -1,0 +1,128 @@
+"""The ingestion DAG.
+
+A DAG that fails to import is invisible: Airflow shows a parse error in the UI
+and simply never schedules it. These tests are the cheapest way to know that
+has not happened, and they run without a database or a scheduler.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.dag
+
+DAG_ID = "book_ingestion"
+
+
+class TestItLoads:
+    def test_the_dagbag_has_no_import_errors(self, dagbag: Any) -> None:
+        # The failure this exists for: a typo makes the DAG vanish from the UI
+        # rather than fail loudly.
+        assert dagbag.import_errors == {}
+
+    def test_the_dag_is_present(self, dagbag: Any) -> None:
+        assert DAG_ID in dagbag.dags
+
+    def test_it_has_no_cycles(self, dagbag: Any) -> None:
+        # dag.check_cycle() in Airflow 3; airflow.utils.dag_cycle_tester is
+        # deprecated.
+        dagbag.dags[DAG_ID].check_cycle()
+
+
+class TestSchedulingContract:
+    def test_it_runs_nightly(self, dagbag: Any) -> None:
+        assert dagbag.dags[DAG_ID].schedule == "0 2 * * *"
+
+    def test_catchup_is_off(self, dagbag: Any) -> None:
+        # Catching up would replay every missed night against live sources.
+        assert dagbag.dags[DAG_ID].catchup is False
+
+    def test_only_one_run_at_a_time(self, dagbag: Any) -> None:
+        # Two concurrent runs would resolve the same candidates twice and
+        # spend two runs' worth of a per-run source budget.
+        assert dagbag.dags[DAG_ID].max_active_runs == 1
+
+    def test_retries_back_off(self, dagbag: Any) -> None:
+        args = dagbag.dags[DAG_ID].default_args
+
+        assert args["retries"] == 3
+        assert args["retry_exponential_backoff"] is True
+        assert args["max_retry_delay"] == timedelta(minutes=30)
+
+
+class TestTaskGraph:
+    def test_the_tasks_match_the_release_architecture(self, dagbag: Any) -> None:
+        assert set(dagbag.dags[DAG_ID].task_ids) == {
+            "discover_candidates",
+            "resolve_and_load",
+            "assess_extraction",
+            "finalise_run",
+        }
+
+    @pytest.mark.parametrize(
+        ("upstream", "downstream"),
+        [
+            ("discover_candidates", "resolve_and_load"),
+            ("discover_candidates", "assess_extraction"),
+            ("resolve_and_load", "assess_extraction"),
+            ("assess_extraction", "finalise_run"),
+        ],
+    )
+    def test_dependencies_are_wired(self, dagbag: Any, upstream: str, downstream: str) -> None:
+        task = dagbag.dags[DAG_ID].get_task(downstream)
+
+        assert upstream in task.upstream_task_ids
+
+    def test_nothing_runs_before_discovery(self, dagbag: Any) -> None:
+        assert dagbag.dags[DAG_ID].get_task("discover_candidates").upstream_task_ids == set()
+
+
+class TestTimeouts:
+    def test_orchestration_tasks_are_capped_at_an_hour(self, dagbag: Any) -> None:
+        assert dagbag.dags[DAG_ID].get_task("discover_candidates").execution_timeout == (
+            timedelta(hours=1)
+        )
+
+    def test_resolution_gets_longer(self, dagbag: Any) -> None:
+        # Goodreads permits one in-flight request and a resolved candidate can
+        # need three calls, so a first seed is hours rather than minutes.
+        assert dagbag.dags[DAG_ID].get_task("resolve_and_load").execution_timeout == (
+            timedelta(hours=6)
+        )
+
+    def test_every_task_has_a_timeout(self, dagbag: Any) -> None:
+        # A task with no timeout can hold a slot indefinitely.
+        dag = dagbag.dags[DAG_ID]
+
+        assert all(dag.get_task(t).execution_timeout is not None for t in dag.task_ids)
+
+
+class TestXComDiscipline:
+    def test_no_task_returns_book_records(self) -> None:
+        """XCom is metadata, not a data channel.
+
+        Asserted against the source rather than a run, because the failure is
+        someone returning a list of books from a task and it working fine on
+        ten records. The names below are what the tasks are allowed to return.
+        """
+        import inspect
+
+        import book_ingestion_dag
+
+        source = inspect.getsource(book_ingestion_dag)
+
+        for forbidden in ("return clean", "return books", "return records", "return observations"):
+            assert forbidden not in source
+
+    def test_discovery_returns_a_path_and_a_count(self) -> None:
+        import inspect
+
+        import book_ingestion_dag
+
+        source = inspect.getsource(book_ingestion_dag.book_ingestion)
+
+        assert "manifest_path" in source
+        assert "candidates" in source

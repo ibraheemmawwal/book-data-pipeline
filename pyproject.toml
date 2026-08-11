@@ -30,6 +30,9 @@ kafka = ["confluent-kafka>=2.6,<3"]
 pipeline = "pipeline.cli:main"
 
 [dependency-groups]
+airflow = [
+    "apache-airflow==3.3.*",
+]
 dev = [
     "pytest>=8.3,<9",
     "pytest-cov>=6.0,<8",
@@ -84,6 +87,13 @@ select = [
 "tests/**" = ["PLR2004", "ARG001"]
 # Alembic writes these. Reformatting generated DDL by hand invites a typo in
 # the one file whose correctness cannot be checked by reading the diff.
+# Airflow re-parses every DAG file on a schedule, so a top-level import of a
+# database driver or an HTTP client runs on each parse. Deferring them into the
+# task bodies is the documented Airflow practice, not an oversight.
+"dags/*" = ["PLC0415"]
+# Same reason on the other side: these import Airflow and the DAG module only
+# after importorskip has confirmed the optional dependency is present.
+"tests/dag/*" = ["PLC0415"]
 # Alembic writes these from a template we do not control.
 "migrations/versions/*" = ["E501", "UP035", "UP007", "I001"]
 # These modules exist to fold ambiguous Unicode punctuation into its plain

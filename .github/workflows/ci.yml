@@ -35,7 +35,7 @@ jobs:
           # Per job: four parallel jobs sharing one key race to reserve it and
           # the losers emit a save warning on every run.
           cache-suffix: ${{ github.job }}
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --no-group airflow
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       # src/ only: dags/ is excluded deliberately and covered by the dag job.
@@ -53,7 +53,7 @@ jobs:
           # Per job: four parallel jobs sharing one key race to reserve it and
           # the losers emit a save warning on every run.
           cache-suffix: ${{ github.job }}
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --no-group airflow
       # --cov-fail-under=0 overrides the project's fail_under for this job.
       # One job cannot fairly judge coverage of code another job exercises:
       # unit tests alone score 90%, integration alone 54%. The coverage job
@@ -83,7 +83,7 @@ jobs:
           # Per job: four parallel jobs sharing one key race to reserve it and
           # the losers emit a save warning on every run.
           cache-suffix: ${{ github.job }}
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --no-group airflow
       # testcontainers starts its own PostgreSQL 16, matching the deployment
       # target. A service container would be a second, differently-configured
       # database that the tests do not actually use.
@@ -101,6 +101,27 @@ jobs:
           include-hidden-files: true
           retention-days: 1
 
+  dag:
+    name: Airflow DAG
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ${{ github.job }}
+      # Airflow is its own dependency group: the pipeline package does not need
+      # it, and installing it everywhere would slow every other job for one.
+      - run: uv sync --all-groups --group airflow
+      # A DAG that fails to import is invisible — Airflow shows a parse error
+      # and simply never schedules it. This is the cheapest way to know.
+      - name: Parse and check the DAG
+        run: uv run --group airflow pytest -m dag -p no:randomly
+        env:
+          AIRFLOW__CORE__UNIT_TEST_MODE: "True"
+          AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+
   coverage:
     name: Combined coverage gate
     runs-on: ubuntu-latest
@@ -114,7 +135,7 @@ jobs:
           # Per job: four parallel jobs sharing one key race to reserve it and
           # the losers emit a save warning on every run.
           cache-suffix: ${{ github.job }}
-      - run: uv sync --all-groups
+      - run: uv sync --all-groups --no-group airflow
       - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
@@ -137,8 +158,11 @@ jobs:
 # They arrive with the milestone that gives them content:
 #
 #   kafka-integration  -> v2.0, with the first `-m integration` Kafka tests
-#   dag                -> v1.0, with dags/book_ingestion_dag.py and DagBag tests
 #   image              -> v1.0, with docker/pipeline.Dockerfile
+#
+# The dag job is deliberately absent from `coverage.needs`: dags/ sits outside
+# src/ and contributes nothing the gate measures, so making the gate wait on it
+# would only slow the pipeline down.
 #
 # When kafka-integration lands it must upload .coverage.kafka and be added to
 # this workflow's `coverage.needs`, or the gate will silently measure less than
