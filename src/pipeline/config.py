@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     gutendex_enabled: bool = True
     gutendex_base_url: str = "https://gutendex.com"
     gutendex_max_records: Annotated[int, Field(ge=1)] = 6000
+    # Small on purpose: Gutendex is a last resort, and a Goodreads outage must
+    # not quietly promote it back to being the bulk source.
+    gutendex_max_last_resort_queries_per_run: Annotated[int, Field(ge=0)] = 200
 
     # --- Open Library -------------------------------------------------------
     openlibrary_enabled: bool = True
@@ -99,12 +102,18 @@ class Settings(BaseSettings):
         float, Field(gt=0, le=MAX_OPENLIBRARY_REQUESTS_PER_SECOND)
     ] = MAX_OPENLIBRARY_REQUESTS_PER_SECOND
     openlibrary_max_records: Annotated[int, Field(ge=1)] = 500
+    # Budget exhaustion is an observable skip, not permission to bulk-page a
+    # source whose guidance points at dumps for volume.
+    openlibrary_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
 
     # --- Google Books -------------------------------------------------------
     googlebooks_enabled: bool = True
     googlebooks_base_url: str = "https://www.googleapis.com"
     googlebooks_api_key: SecretStr | None = None
     googlebooks_max_records: Annotated[int, Field(ge=1)] = 500
+    # Kept below the cloud project quota so one upstream outage cannot spend a
+    # whole day's allowance in minutes.
+    googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
 
     # --- Goodreads (unofficial; see the ADR) --------------------------------
     # Both gates default to false. Goodreads ended public API access in 2020,

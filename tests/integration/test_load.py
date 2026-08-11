@@ -8,22 +8,26 @@ ordering, so it can only be proven here.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from sqlalchemy import Connection, Engine, insert, select, text, update
 
-from pipeline.extract import googlebooks, gutendex, openlibrary
+from pipeline.extract import goodreads, googlebooks, gutendex, openlibrary
 from pipeline.extract.base import Rejected
 from pipeline.load import CatalogueLoader, LoadResult, record_rejection
 from pipeline.models.db import authors as authors_table
 from pipeline.models.db import (
     book_authors,
+    book_series,
     book_sources,
     book_subjects,
     books,
     ingestion_runs,
     rejected_records,
+    series,
+    series_sources,
     subjects,
 )
 from pipeline.models.domain import CleanBook, RawBook, SourceName
@@ -563,3 +567,120 @@ class TestUnreplayableProvenance:
 
         assert count(connection, books) == 1
         assert connection.execute(select(books.c.title)).scalar_one() == "Moby Dick"
+
+
+def goodreads_payload(source_id: str = "gr1", **fields: Any) -> CleanBook:
+    """A record whose raw_payload is genuinely Goodreads-autocomplete-shaped."""
+    payload: dict[str, Any] = {
+        "bookId": source_id,
+        "title": fields.pop("title", "A Game of Thrones (A Song of Ice and Fire, #1)"),
+        "bookTitleBare": fields.pop("bare", "A Game of Thrones"),
+        "author": {"id": "346732", "name": "George R.R. Martin"},
+        **fields,
+    }
+    mapped = goodreads.map_payload(payload)
+    assert isinstance(mapped, RawBook), mapped
+    return _clean(mapped)
+
+
+class TestSeries:
+    def test_a_series_is_created_and_linked(self, engine: Engine, connection: Connection) -> None:
+        CatalogueLoader().load(engine, [goodreads_payload()])
+
+        assert count(connection, series) == 1
+        assert count(connection, book_series) == 1
+
+    def test_the_position_survives_as_an_exact_decimal(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        CatalogueLoader().load(engine, [goodreads_payload(title="Novella (Discworld, #2.5)")])
+
+        position = connection.execute(select(book_series.c.position)).scalar_one()
+        assert position == Decimal("2.5")
+
+    def test_two_books_in_one_series_share_the_series_row(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        CatalogueLoader().load(
+            engine,
+            [
+                goodreads_payload("gr1", title="One (A Song of Ice and Fire, #1)", bare="One"),
+                goodreads_payload("gr2", title="Two (A Song of Ice and Fire, #2)", bare="Two"),
+            ],
+        )
+
+        assert count(connection, series) == 1
+        assert count(connection, book_series) == 2
+
+    def test_series_search_text_is_populated(self, engine: Engine, connection: Connection) -> None:
+        CatalogueLoader().load(engine, [goodreads_payload()])
+
+        text = connection.execute(select(books.c.series_search_text)).scalar_one()
+        assert text == "A Song of Ice and Fire"
+
+    def test_a_book_with_no_series_has_an_empty_projection(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # The column is NOT NULL DEFAULT '', so this must never be NULL.
+        CatalogueLoader().load(engine, [gutendex_payload("1")])
+
+        assert connection.execute(select(books.c.series_search_text)).scalar_one() == ""
+
+    def test_the_series_name_is_searchable_at_title_weight(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # The whole reason the projection is denormalised: a reader searching a
+        # series name should find its books.
+        CatalogueLoader().load(engine, [goodreads_payload()])
+
+        found = (
+            connection.execute(
+                text(
+                    "SELECT title FROM books, websearch_to_tsquery('english', 'ice and fire') q "
+                    "WHERE search_vector @@ q"
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        assert found == ["A Game of Thrones"]
+
+    def test_reloading_does_not_duplicate_the_series(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        loader = CatalogueLoader()
+        for _ in range(3):
+            loader.load(engine, [goodreads_payload()])
+
+        assert count(connection, series) == 1
+        assert count(connection, book_series) == 1
+
+    def test_reloading_does_not_move_updated_at(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        loader = CatalogueLoader()
+        loader.load(engine, [goodreads_payload()])
+        before = connection.execute(select(books.c.updated_at)).scalar_one()
+        connection.rollback()
+
+        loader.load(engine, [goodreads_payload()])
+
+        assert connection.execute(select(books.c.updated_at)).scalar_one() == before
+
+    def test_a_confirmed_relationship_is_recorded_as_confirmed(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # A title-inferred series is a guess, so it stores confirmed=false.
+        CatalogueLoader().load(engine, [goodreads_payload()])
+
+        assert connection.execute(select(book_series.c.confirmed)).scalar_one() is False
+
+    def test_provenance_is_kept_when_a_source_series_id_exists(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Autocomplete carries no series id, so nothing to record here; the
+        # detail parser is what supplies one.
+        CatalogueLoader().load(engine, [goodreads_payload()])
+
+        assert count(connection, series_sources) == 0

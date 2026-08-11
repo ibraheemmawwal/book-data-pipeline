@@ -30,6 +30,7 @@ from pipeline.transform.normalise import (
     parse_year,
     select_language,
 )
+from pipeline.transform.series import canonicalise_series
 
 # Applied only when two records look equally complete. Goodreads is the
 # preferred resolver for title, author, description, series and edition facts.
@@ -55,6 +56,7 @@ _MERGEABLE_FIELDS = (
     "description",
     "cover_url",
     "download_count",
+    "goodreads_average_rating",
     "normalised_first_author",
 )
 
@@ -64,6 +66,7 @@ _COMPLETENESS_FIELDS = (
     *_MERGEABLE_FIELDS,
     "authors",
     "subjects",
+    "series",
 )
 
 
@@ -125,6 +128,13 @@ def canonicalise(record: RawBook) -> CleanBook | Rejected:
             subjects=[
                 subject for subject in record.subjects if normalise_subject(subject) is not None
             ],
+            series=[
+                membership
+                for raw_membership in record.series
+                if (membership := canonicalise_series(raw_membership, source=record.source))
+                is not None
+            ],
+            goodreads_average_rating=record.goodreads_average_rating,
             source_updated=record.source_updated,
             raw_payload=record.raw_payload,
         )
@@ -229,6 +239,12 @@ def merge_candidates(
     # orderings and produce a credit order neither source ever published.
     richest_authors = next((b for b in ordered if b.authors), winner)
     richest_subjects = next((b for b in ordered if b.subjects), winner)
+    # A confirmed relationship outranks an inferred one regardless of source
+    # priority: evidence beats a guess even from a preferred provider.
+    richest_series = next(
+        (b for b in ordered if any(s.confirmed for s in b.series)),
+        next((b for b in ordered if b.series), winner),
+    )
 
     return CleanBook.model_validate(
         {
@@ -238,5 +254,6 @@ def merge_candidates(
             "isbn13": final_isbn,
             "authors": list(richest_authors.authors),
             "subjects": list(richest_subjects.subjects),
+            "series": list(richest_series.series),
         }
     )

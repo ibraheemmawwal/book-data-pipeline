@@ -26,6 +26,8 @@ from pipeline.extract.goodreads import (
     GoodreadsResultCache,
     GoodreadsUnavailableError,
     map_payload,
+)
+from pipeline.extract.goodreads_parsers import (
     parse_aria_series,
     parse_json_ld,
     parse_series_id,
@@ -410,3 +412,180 @@ class TestFinalEdgeCases:
 
         assert parsed is not None
         assert parsed["name"] == "Dune"
+
+
+BOOK_SHOW = r".*/book/show/.*"
+WORK_EDITIONS = r".*/work/editions/.*"
+MARKUP = Path(__file__).parent.parent.parent / "fixtures"
+
+
+class TestResolve:
+    @respx.mock
+    async def test_a_title_query_resolves_the_best_candidate(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "A Game of Thrones by George R.R. Martin")
+
+        assert book is not None
+        assert book.source_id == "13496"
+
+    @respx.mock
+    async def test_an_empty_autocomplete_resolves_to_none(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # A miss is the resolver's cue to fall back, not an error.
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=[]))
+
+        async with extractor.build_client() as client:
+            assert await extractor.resolve(client, "no such book") is None
+
+    @respx.mock
+    async def test_a_poor_match_is_rejected_by_the_threshold(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # Returning an unrelated book would be worse than returning nothing.
+        # Note the threshold is weak: normalised Levenshtein puts two unrelated
+        # titles of similar length near 0.4, so this uses a clearly dissimilar
+        # query rather than a merely wrong one.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+
+        async with extractor.build_client() as client:
+            assert await extractor.resolve(client, "Zzyzx") is None
+
+    @respx.mock
+    async def test_an_isbn_query_bypasses_the_similarity_threshold(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # An ISBN is an exact identifier; Goodreads' own ordering is better
+        # evidence than string similarity against a title we may have wrong.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "totally unrelated text", isbn="9780553380163")
+
+        assert book is not None
+
+    @respx.mock
+    async def test_the_second_call_is_served_from_cache(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        route = respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            await extractor.resolve(client, "A Game of Thrones")
+            await extractor.resolve(client, "A Game of Thrones")
+
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_a_miss_is_never_cached(self, extractor: GoodreadsExtractor) -> None:
+        # Caching an empty answer would turn a transient blip into a run-long
+        # hole in the catalogue.
+        route = respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=[]))
+
+        async with extractor.build_client() as client:
+            await extractor.resolve(client, "nothing")
+            await extractor.resolve(client, "nothing")
+
+        assert route.call_count == 2
+
+
+class TestEnrichment:
+    @respx.mock
+    async def test_detail_pages_add_series_and_edition_facts(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(
+            return_value=httpx.Response(
+                200, text=(MARKUP / "goodreads_book_detail.html").read_text()
+            )
+        )
+        respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(
+                200, text=(MARKUP / "goodreads_work_editions.html").read_text()
+            )
+        )
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "A Game of Thrones")
+
+        assert book is not None
+        assert book.isbns == ["9780553381689"]
+        assert book.publisher == "Bantam Books"
+        assert book.series[0].name == "A Song of Ice and Fire"
+
+    @respx.mock
+    async def test_one_surviving_page_still_enriches(self, extractor: GoodreadsExtractor) -> None:
+        # gather(return_exceptions=True): a partial observation beats none.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(
+            return_value=httpx.Response(
+                200, text=(MARKUP / "goodreads_book_detail.html").read_text()
+            )
+        )
+        respx.get(url__regex=WORK_EDITIONS).mock(side_effect=httpx.ConnectError("down"))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "A Game of Thrones")
+
+        assert book is not None
+        assert book.series[0].name == "A Song of Ice and Fire"
+        assert book.isbns == []
+
+    @respx.mock
+    async def test_both_pages_failing_leaves_the_autocomplete_observation(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # Detail is enrichment, not a precondition: autocomplete alone is
+        # already a valid record.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "A Game of Thrones")
+
+        assert book is not None
+        assert book.title == "A Game of Thrones"
+        assert book.page_count == 835
+
+    @respx.mock
+    async def test_detail_is_fetched_for_the_winner_only(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # Fanning detail across every autocomplete result would multiply our
+        # traffic against an unofficial source for no gain.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        book_route = respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            await extractor.resolve(client, "A Game of Thrones")
+
+        assert book_route.call_count == 1

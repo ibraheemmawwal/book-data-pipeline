@@ -8,12 +8,15 @@ which is what makes an unofficial source testable without touching it.
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from pipeline.extract.goodreads_parsers import (
     clean_html_text,
     is_placeholder_cover,
+    parse_book_detail,
+    parse_first_edition,
     parse_series_from_title,
     score_candidate,
     split_title_by_author,
@@ -213,3 +216,125 @@ class TestParserEdgeCases:
 
     def test_html_with_only_markup_yields_none(self) -> None:
         assert clean_html_text("<div><span></span></div>") is None
+
+
+DETAIL_FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
+
+
+def markup(name: str) -> str:
+    return (DETAIL_FIXTURES / name).read_text()
+
+
+class TestParseBookDetail:
+    def test_reads_page_count_from_json_ld(self) -> None:
+        # JSON-LD first: it is structured data the site publishes deliberately,
+        # so it changes less often than the markup around it.
+        assert parse_book_detail(markup("goodreads_book_detail.html")).page_count == 835
+
+    def test_falls_back_to_the_description_element(self) -> None:
+        # The live JSON-LD carries no description, so the attribute fallback is
+        # the only path to it.
+        detail = parse_book_detail(markup("goodreads_book_detail.html"))
+
+        assert detail.description is not None
+        assert "preternatural event" in detail.description
+        assert "<br>" not in detail.description
+
+    def test_reads_the_series_from_the_aria_label(self) -> None:
+        detail = parse_book_detail(markup("goodreads_book_detail.html"))
+
+        assert detail.series is not None
+        assert detail.series.name == "A Song of Ice and Fire"
+        assert detail.series.position == "1"
+
+    def test_a_page_with_no_series_link_is_unconfirmed(self) -> None:
+        # The real page carries no /series/ href, so the relationship is
+        # inferred rather than evidenced, and must say so.
+        detail = parse_book_detail(markup("goodreads_book_detail.html"))
+
+        assert detail.series is not None
+        assert detail.series.confirmed is False
+        assert detail.series.source_series_id is None
+
+    def test_a_matching_series_link_confirms_the_relationship(self) -> None:
+        html = (
+            '<div aria-label="Book 1 in the Discworld series">'
+            '<a href="/series/40650-discworld">Discworld</a></div>'
+        )
+        detail = parse_book_detail(html)
+
+        assert detail.series is not None
+        assert detail.series.confirmed is True
+        assert detail.series.source_series_id == "40650"
+
+    def test_the_raw_json_ld_is_retained(self) -> None:
+        detail = parse_book_detail(markup("goodreads_book_detail.html"))
+
+        assert detail.payload["json_ld"]["@type"] == "Book"
+
+    @pytest.mark.parametrize(
+        "html", ["", "<html></html>", "<html><body>nothing useful</body></html>"]
+    )
+    def test_an_unrecognisable_page_degrades_rather_than_raising(self, html: str) -> None:
+        # An undocumented contract that changed shape must produce a thinner
+        # observation, not fail the candidate.
+        detail = parse_book_detail(html)
+
+        assert detail.description is None
+        assert detail.series is None
+
+    def test_a_non_numeric_page_count_is_ignored(self) -> None:
+        html = '<script type="application/ld+json">{"@type":"Book","numberOfPages":"lots"}</script>'
+
+        assert parse_book_detail(html).page_count is None
+
+    def test_a_page_count_supplied_as_a_string_is_accepted(self) -> None:
+        html = '<script type="application/ld+json">{"@type":"Book","numberOfPages":"412"}</script>'
+
+        assert parse_book_detail(html).page_count == 412
+
+    @pytest.mark.parametrize("bad", ["0", "-5", "true"])
+    def test_a_non_positive_page_count_is_refused(self, bad: str) -> None:
+        html = (
+            f'<script type="application/ld+json">{{"@type":"Book","numberOfPages":{bad}}}</script>'
+        )
+
+        assert parse_book_detail(html).page_count is None
+
+
+class TestParseFirstEdition:
+    def test_reads_only_the_first_edition_block(self) -> None:
+        # The page lists every edition ever published; merging them would
+        # invent a book that never existed.
+        edition = parse_first_edition(markup("goodreads_work_editions.html"))
+
+        assert edition.isbn13 == "9780553381689"
+        assert edition.publisher == "Bantam Books"
+
+    def test_an_isbn10_is_converted_through_checksum_validation(self) -> None:
+        # The fixture's first block carries the ISBN-10 form.
+        assert parse_first_edition(markup("goodreads_work_editions.html")).isbn13 == (
+            "9780553381689"
+        )
+
+    def test_a_full_publication_date_is_read(self) -> None:
+        assert parse_first_edition(markup("goodreads_work_editions.html")).published == (
+            "August 4, 1997"
+        )
+
+    def test_a_month_only_date_is_accepted(self) -> None:
+        html = '<div data-testid="editionCell">Published by X\nSeptember 1998</div>'
+
+        assert parse_first_edition(html).published == "September 1998"
+
+    def test_a_page_with_no_edition_block_yields_nothing(self) -> None:
+        edition = parse_first_edition("<html><body>no editions</body></html>")
+
+        assert edition.isbn13 is None
+        assert edition.publisher is None
+
+    def test_an_invalid_isbn_is_dropped_rather_than_stored(self) -> None:
+        # A bad ISBN would become a canonical identity and merge wrong books.
+        html = '<div data-testid="editionCell">ISBN 9780553381680</div>'
+
+        assert parse_first_edition(html).isbn13 is None

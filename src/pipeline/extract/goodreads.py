@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -39,7 +38,6 @@ from typing import Any
 import httpx
 import structlog
 from pydantic import ValidationError
-from selectolax.parser import HTMLParser
 
 from pipeline.config import Settings
 from pipeline.extract.base import (
@@ -53,7 +51,11 @@ from pipeline.extract.base import (
 from pipeline.extract.goodreads_parsers import (
     clean_html_text,
     is_placeholder_cover,
+    parse_book_detail,
+    parse_first_edition,
     parse_series_from_title,
+    score_candidate,
+    split_title_by_author,
     upgrade_cover_url,
 )
 from pipeline.models.domain import RawAuthor, RawBook, RawSeriesMembership, SourceName
@@ -71,9 +73,6 @@ MAX_DETAIL_ATTEMPTS = 3
 MAX_RATING = Decimal(5)
 SERVER_ERROR_THRESHOLD = 500
 CLIENT_ERROR_THRESHOLD = 400
-_ARIA_SERIES = re.compile(r"Book\s+([\d.]+)\s+in\s+the\s+(.+?)\s+series", re.IGNORECASE)
-_SERIES_HREF = re.compile(r"/series/(\d+)(?:-([a-z0-9-]+))?", re.IGNORECASE)
-_NON_SLUG = re.compile(r"[^a-z0-9]+")
 
 
 class GoodreadsUnavailableError(SourceUnavailableError):
@@ -164,77 +163,6 @@ def _looks_like_challenge(body: str) -> bool:
     return any(marker in lowered for marker in CHALLENGE_MARKERS)
 
 
-def _slugify(value: str) -> str:
-    return _NON_SLUG.sub("-", value.strip().casefold()).strip("-")
-
-
-def parse_series_id(href: str | None, series_name: str) -> str | None:
-    """Accept a Goodreads series id only when its slug matches the name.
-
-    An id taken from an unrelated link would attach a book to the wrong series
-    permanently, and nothing downstream could detect it. When the slug does not
-    agree the relationship is still recorded — just unconfirmed.
-    """
-    if not href:
-        return None
-    match = _SERIES_HREF.search(href)
-    if match is None:
-        return None
-    slug = match.group(2)
-    if slug and _slugify(slug) != _slugify(series_name):
-        return None
-    return match.group(1)
-
-
-def parse_aria_series(label: str | None) -> tuple[str, Decimal | None] | None:
-    """Read ``Book 2.5 in the Discworld series`` from an ARIA label."""
-    if not label:
-        return None
-    match = _ARIA_SERIES.search(label)
-    if match is None:
-        return None
-    try:
-        position: Decimal | None = Decimal(match.group(1))
-    except InvalidOperation:
-        position = None
-    name = match.group(2).strip()
-    return (name, position) if name else None
-
-
-def parse_json_ld(html: str) -> dict[str, Any] | None:
-    """Pull the Book JSON-LD block out of a detail page.
-
-    Preferred over scraping attributes because it is structured data the site
-    publishes deliberately, so it changes less often than the markup around it.
-    """
-    tree = HTMLParser(html)
-    for node in tree.css('script[type="application/ld+json"]'):
-        raw = node.text(strip=True)
-        if not raw:
-            continue
-        try:
-            document = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        candidates = document if isinstance(document, list) else [document]
-        for candidate in candidates:
-            if isinstance(candidate, dict) and candidate.get("@type") in {"Book", "Product"}:
-                return candidate
-    return None
-
-
-def json_ld_authors(value: Any) -> list[str]:
-    """JSON-LD ``author`` is an object or an array of them, never reliably one."""
-    entries = value if isinstance(value, list) else [value]
-    names = []
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("name"):
-            names.append(str(entry["name"]).strip())
-        elif isinstance(entry, str) and entry.strip():
-            names.append(entry.strip())
-    return names
-
-
 class GoodreadsExtractor:
     """Resolves one candidate at a time against Goodreads."""
 
@@ -318,6 +246,134 @@ class GoodreadsExtractor:
 
         self._circuit.record_success()
         return body
+
+    async def resolve(
+        self, client: httpx.AsyncClient, query: str, *, isbn: str | None = None
+    ) -> RawBook | None:
+        """Resolve one candidate: autocomplete, rank, then enrich with detail.
+
+        ISBN queries bypass ranking entirely. An ISBN is an exact identifier,
+        so Goodreads' own candidate ordering is better evidence than string
+        similarity against a title we may already have wrong.
+
+        Detail is fetched for the top-ranked candidate only, falling through to
+        the second and third if its pages cannot be parsed. Fanning detail
+        requests across every autocomplete result would multiply our traffic
+        against an unofficial source for no gain.
+
+        Returns ``None`` when nothing matches. Never raises for a miss — that
+        is the resolver's cue to fall back, not an error.
+        """
+        cache_key = f"isbn:{isbn}" if isbn else f"q:{query.casefold()}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        candidates = await self.autocomplete(client, isbn or query)
+        if not candidates:
+            return None
+
+        ranked = self._rank(candidates, query, isbn)
+        if not ranked:
+            return None
+
+        for candidate in ranked[:MAX_DETAIL_ATTEMPTS]:
+            observation = self.to_raw_book(candidate)
+            if isinstance(observation, Rejected):
+                continue
+            enriched = await self._enrich(client, observation, candidate)
+            # Only validated, non-empty results are cached. Caching a miss
+            # would turn a transient blip into a run-long hole.
+            self._cache.put(cache_key, enriched, is_isbn=isbn is not None)
+            return enriched
+
+        return None
+
+    def _rank(
+        self, candidates: list[dict[str, Any]], query: str, isbn: str | None
+    ) -> list[dict[str, Any]]:
+        """Order candidates best-first, or trust the source for ISBN queries."""
+        if isbn:
+            return candidates
+
+        title, author = split_title_by_author(query)
+        scored = [
+            (
+                score_candidate(
+                    title,
+                    author,
+                    str(candidate.get("bookTitleBare") or candidate.get("title") or ""),
+                    (candidate.get("author") or {}).get("name")
+                    if isinstance(candidate.get("author"), dict)
+                    else None,
+                ),
+                index,
+                candidate,
+            )
+            for index, candidate in enumerate(candidates)
+        ]
+        # Index breaks ties so ordering is total and the same response always
+        # ranks the same way.
+        return [
+            candidate
+            for score, _, candidate in sorted(scored, key=lambda item: (-item[0], item[1]))
+            if score >= self._settings.goodreads_min_match_score
+        ]
+
+    async def _enrich(
+        self,
+        client: httpx.AsyncClient,
+        observation: RawBook,
+        candidate: dict[str, Any],
+    ) -> RawBook:
+        """Add detail-page facts to an autocomplete observation.
+
+        The book and work pages are fetched concurrently with
+        ``return_exceptions=True``: one surviving page still produces a better
+        observation than neither, and detail is enrichment rather than a
+        precondition. Autocomplete alone is already a valid record.
+        """
+        book_id = candidate.get("bookId")
+        work_id = candidate.get("workId")
+        if not book_id:
+            return observation
+
+        paths = [self._get(client, f"/book/show/{book_id}")]
+        if work_id:
+            paths.append(self._get(client, f"/work/editions/{work_id}"))
+
+        results = await asyncio.gather(*paths, return_exceptions=True)
+        book_html = results[0] if isinstance(results[0], str) else None
+        work_html = results[1] if len(results) > 1 and isinstance(results[1], str) else None
+
+        updates: dict[str, Any] = {}
+        payload = dict(observation.raw_payload)
+
+        if book_html is not None:
+            detail = parse_book_detail(book_html)
+            payload["_detail"] = detail.payload
+            if detail.description:
+                updates["description"] = detail.description
+            if detail.series is not None:
+                updates["series"] = [detail.series]
+            if detail.page_count:
+                updates["page_count"] = detail.page_count
+
+        if work_html is not None:
+            edition = parse_first_edition(work_html)
+            payload["_edition"] = edition.payload
+            if edition.isbn13:
+                updates["isbns"] = [edition.isbn13]
+            if edition.published:
+                updates["published"] = edition.published
+            if edition.publisher:
+                updates["publisher"] = edition.publisher
+
+        if not updates:
+            return observation
+
+        updates["raw_payload"] = payload
+        return observation.model_copy(update=updates)
 
     def build_client(self) -> httpx.AsyncClient:
         """A client identifying itself honestly, with a hard timeout."""

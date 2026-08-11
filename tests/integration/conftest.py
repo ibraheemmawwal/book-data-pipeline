@@ -17,6 +17,8 @@ from alembic.config import Config
 from sqlalchemy import Connection, Engine, create_engine, text
 from testcontainers.community.postgres import PostgresContainer
 
+from pipeline.models.db import metadata
+
 REPO_ROOT = Path(__file__).parent.parent.parent
 
 
@@ -54,10 +56,11 @@ def connection(migrated_engine: Engine) -> Iterator[Connection]:
     with migrated_engine.connect() as conn:
         conn.execute(
             text(
-                "TRUNCATE books, book_sources, authors, author_sources, "
-                "book_authors, subjects, book_subjects, ingestion_runs, "
-                "source_runs, run_topic_partitions, run_partition_markers, "
-                "rejected_records RESTART IDENTITY CASCADE"
+                # Derived from metadata rather than a hand-written list: a
+                # table added to the schema and forgotten here leaks state
+                # between tests and produces failures that only appear in a
+                # full run.
+                f"TRUNCATE {', '.join(sorted(metadata.tables))} RESTART IDENTITY CASCADE"
             )
         )
         conn.commit()

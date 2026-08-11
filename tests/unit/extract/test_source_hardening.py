@@ -15,7 +15,7 @@ import pytest
 import respx
 
 from pipeline.config import Settings
-from pipeline.extract import goodreads, googlebooks, gutendex, openlibrary
+from pipeline.extract import goodreads_parsers, googlebooks, gutendex, openlibrary
 from pipeline.extract.base import (
     ExtractionRequest,
     InvalidSourceRecordError,
@@ -27,6 +27,7 @@ from pipeline.extract.base import (
     require_object,
     string_list,
 )
+from pipeline.extract.goodreads import map_payload as goodreads_map_payload
 from pipeline.extract.googlebooks import GoogleBooksExtractor
 from pipeline.extract.gutendex import GutendexExtractor
 from pipeline.extract.openlibrary import OpenLibraryExtractor
@@ -277,32 +278,32 @@ class TestGoogleBooksHardening:
 class TestGoodreadsHardening:
     def test_an_unparseable_series_position_drops_only_the_position(self) -> None:
         # The relationship is still real even when the number is nonsense.
-        book = goodreads.map_payload({"bookId": "1", "title": "Book (Series, #not-a-number)"})
+        book = goodreads_map_payload({"bookId": "1", "title": "Book (Series, #not-a-number)"})
 
         assert isinstance(book, RawBook)
 
     def test_json_ld_authors_accepts_an_object(self) -> None:
-        assert goodreads.json_ld_authors({"name": "Frank Herbert"}) == ["Frank Herbert"]
+        assert goodreads_parsers.json_ld_authors({"name": "Frank Herbert"}) == ["Frank Herbert"]
 
     def test_json_ld_authors_accepts_an_array(self) -> None:
         # JSON-LD is inconsistent here and both shapes appear in the wild.
-        assert goodreads.json_ld_authors([{"name": "A"}, {"name": "B"}]) == ["A", "B"]
+        assert goodreads_parsers.json_ld_authors([{"name": "A"}, {"name": "B"}]) == ["A", "B"]
 
     def test_json_ld_authors_accepts_bare_strings(self) -> None:
-        assert goodreads.json_ld_authors(["A", "  B  "]) == ["A", "B"]
+        assert goodreads_parsers.json_ld_authors(["A", "  B  "]) == ["A", "B"]
 
     def test_json_ld_authors_skips_unusable_entries(self) -> None:
-        assert goodreads.json_ld_authors([{"nope": 1}, "", 42, {"name": "C"}]) == ["C"]
+        assert goodreads_parsers.json_ld_authors([{"nope": 1}, "", 42, {"name": "C"}]) == ["C"]
 
     def test_a_non_numeric_rating_is_dropped_not_fatal(self) -> None:
-        book = goodreads.map_payload({"bookId": "1", "title": "X", "avgRating": "n/a"})
+        book = goodreads_map_payload({"bookId": "1", "title": "X", "avgRating": "n/a"})
 
         assert isinstance(book, RawBook)
         assert book.goodreads_average_rating is None
 
     def test_an_out_of_range_rating_is_dropped(self) -> None:
         # Goodreads ratings are 0-5; anything else is a contract change.
-        book = goodreads.map_payload({"bookId": "1", "title": "X", "avgRating": "9.9"})
+        book = goodreads_map_payload({"bookId": "1", "title": "X", "avgRating": "9.9"})
 
         assert isinstance(book, RawBook)
         assert book.goodreads_average_rating is None

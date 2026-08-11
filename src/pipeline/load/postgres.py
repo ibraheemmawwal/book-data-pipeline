@@ -34,13 +34,16 @@ from pipeline.models.db import (
     author_sources,
     authors,
     book_authors,
+    book_series,
     book_sources,
     book_subjects,
     books,
     rejected_records,
+    series,
+    series_sources,
     subjects,
 )
-from pipeline.models.domain import CleanBook, RawAuthor, SourceName
+from pipeline.models.domain import CleanBook, CleanSeriesMembership, RawAuthor, SourceName
 from pipeline.transform import (
     canonicalise,
     content_hash,
@@ -49,6 +52,7 @@ from pipeline.transform import (
     normalise_subject,
     payload_hash,
 )
+from pipeline.transform.series import series_search_text
 
 logger = structlog.get_logger(__name__)
 
@@ -395,7 +399,127 @@ class CatalogueLoader:
 
         self._sync_authors(connection, book_id, candidates)
         self._sync_subjects(connection, book_id, merged.subjects)
+        self._sync_series(connection, book_id, candidates)
         _ = run_id
+
+    def _sync_series(
+        self, connection: Connection, book_id: int, candidates: list[CleanBook]
+    ) -> None:
+        """Attach every series relationship any source reported.
+
+        A confirmed relationship wins over an inferred one for the same series:
+        a ``/series/`` link that agreed with the parsed name is evidence, and a
+        name pulled out of a title is a guess.
+        """
+        best: dict[str, tuple[CleanSeriesMembership, SourceName]] = {}
+        for candidate in candidates:
+            for membership in candidate.series:
+                existing = best.get(membership.identity_key)
+                if existing is None or (membership.confirmed and not existing[0].confirmed):
+                    best[membership.identity_key] = (membership, candidate.source)
+
+        for membership, source in best.values():
+            series_id = self._upsert_series(connection, membership, source)
+            self._link_series(connection, book_id, series_id, membership)
+
+        self._refresh_series_search_text(connection, book_id)
+
+    def _upsert_series(
+        self,
+        connection: Connection,
+        membership: CleanSeriesMembership,
+        source: SourceName,
+    ) -> int:
+        row = connection.execute(
+            insert(series)
+            .values(
+                identity_key=membership.identity_key,
+                name=membership.name,
+                normalized_name=membership.normalised_name,
+            )
+            .on_conflict_do_update(
+                index_elements=["identity_key"],
+                set_={"normalized_name": membership.normalised_name},
+            )
+            .returning(series.c.id)
+        ).one()
+        series_id = int(row.id)
+
+        if membership.source_series_id:
+            payload = {
+                "name": membership.name,
+                "position": str(membership.position) if membership.position else None,
+                "confirmed": membership.confirmed,
+            }
+            statement = insert(series_sources).values(
+                series_id=series_id,
+                source=source.value,
+                source_series_id=membership.source_series_id,
+                raw_payload=payload,
+                payload_hash=payload_hash(payload),
+            )
+            connection.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["source", "source_series_id"],
+                    set_={
+                        "series_id": statement.excluded.series_id,
+                        "raw_payload": statement.excluded.raw_payload,
+                        "payload_hash": statement.excluded.payload_hash,
+                    },
+                )
+            )
+        return series_id
+
+    def _link_series(
+        self,
+        connection: Connection,
+        book_id: int,
+        series_id: int,
+        membership: CleanSeriesMembership,
+    ) -> None:
+        statement = insert(book_series).values(
+            book_id=book_id,
+            series_id=series_id,
+            position=membership.position,
+            confirmed=membership.confirmed,
+        )
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["book_id", "series_id"],
+                set_={
+                    # COALESCE so a source that omits a position cannot blank
+                    # one another source supplied.
+                    "position": func.coalesce(statement.excluded.position, book_series.c.position),
+                    # Confirmation is monotonic: once something confirmed the
+                    # relationship, a later guess cannot un-confirm it.
+                    "confirmed": book_series.c.confirmed | statement.excluded.confirmed,
+                },
+            )
+        )
+
+    def _refresh_series_search_text(self, connection: Connection, book_id: int) -> None:
+        """Recompute the denormalised series projection for one book.
+
+        Written only when it changes, so a book whose series did not move keeps
+        its ``updated_at`` and the idempotency guarantee holds.
+        """
+        names = (
+            connection.execute(
+                select(series.c.name)
+                .select_from(book_series.join(series, book_series.c.series_id == series.c.id))
+                .where(book_series.c.book_id == book_id)
+            )
+            .scalars()
+            .all()
+        )
+        projection = series_search_text(list(names))
+        current = connection.execute(
+            select(books.c.series_search_text).where(books.c.id == book_id)
+        ).scalar_one()
+        if projection != current:
+            connection.execute(
+                update(books).where(books.c.id == book_id).values(series_search_text=projection)
+            )
 
     def _sync_authors(
         self, connection: Connection, book_id: int, candidates: list[CleanBook]

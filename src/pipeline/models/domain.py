@@ -109,6 +109,34 @@ class RawAuthor(_Frozen):
         return self
 
 
+class CandidateBook(_Frozen):
+    """A book worth resolving, discovered from the Open Library dump.
+
+    Not yet a canonical book, and deliberately not a ``RawBook``: discovery
+    says "this exists and here is enough to look it up", which is a weaker
+    claim than "a source observed these fields". The retained discovery payload
+    can still become a provenance-bearing fallback observation, but only after
+    passing the same validation as any API result.
+    """
+
+    candidate_key: NonBlankStr
+    title: NonBlankStr
+    authors: list[str] = Field(default_factory=list)
+    isbns: list[str] = Field(default_factory=list)
+    openlibrary_work_key: str | None = None
+    openlibrary_edition_key: str | None = None
+    languages: list[str] = Field(default_factory=list)
+    discovery_payload: dict[str, Any] = Field(default_factory=dict)
+
+    def lookup_query(self) -> str:
+        """The string a title/author resolver should search for."""
+        return f"{self.title} by {self.authors[0]}" if self.authors else self.title
+
+    def preferred_isbn(self) -> str | None:
+        """The ISBN to resolve by, if the candidate carries a usable one."""
+        return self.isbns[0] if self.isbns else None
+
+
 class RawSeriesMembership(_Frozen):
     """A series relationship exactly as one source reported it.
 

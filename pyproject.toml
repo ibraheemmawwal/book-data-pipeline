@@ -93,6 +93,7 @@ select = [
 "src/pipeline/transform/normalise.py" = ["RUF001"]
 "src/pipeline/transform/isbn.py" = ["RUF001"]
 "tests/unit/transform/test_normalise.py" = ["RUF001"]
+"tests/unit/transform/test_series.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"
