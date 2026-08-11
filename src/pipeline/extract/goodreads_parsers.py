@@ -40,6 +40,14 @@ _TITLE_AUTHOR_PARTS = 2
 # Study Guide edition in a live run and rewrote the canonical title.
 MIN_TITLE_SIMILARITY = 0.75
 
+# A much looser floor for ISBN lookups. An ISBN is an exact identifier, so
+# Goodreads' own answer is better evidence than string similarity against a
+# title we may have wrong — that is why ISBN queries skip ranking. But the two
+# providers can simply disagree about which book an ISBN denotes, and when the
+# answer shares almost nothing with what was asked for, one of them is wrong
+# and guessing which is worse than falling back to a documented source.
+ISBN_SANITY_FLOOR = 0.3
+
 # Words shared with the query but absent from it are the signal that matters.
 # Measured against real cases, this separates wanted matches (>= 0.80) from
 # unwanted ones (<= 0.73) where character similarity could not: "Dune" scores
@@ -172,6 +180,20 @@ def score_candidate(
 
     author_score = _similarity(query_author, candidate_author)
     return TITLE_WEIGHT * title_score + AUTHOR_WEIGHT * author_score
+
+
+def is_plausible_isbn_match(query_title: str, candidate_title: str) -> bool:
+    """Whether an ISBN lookup returned something recognisably the same book.
+
+    Deliberately not the ranking threshold. This rejects a gross mismatch — a
+    completely different book behind the same number — and nothing subtler. It
+    will not catch a provider that maps an ISBN to a companion volume with a
+    similar title, because that is indistinguishable from a provider that
+    simply holds a fuller subtitle than we do.
+    """
+    if not query_title.strip() or not candidate_title.strip():
+        return True
+    return _similarity(query_title, candidate_title) >= ISBN_SANITY_FLOOR
 
 
 def parse_series_from_title(dirty_title: str | None) -> ParsedSeries | None:

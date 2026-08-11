@@ -51,6 +51,7 @@ from pipeline.extract.base import (
 from pipeline.extract.goodreads_parsers import (
     clean_html_text,
     is_placeholder_cover,
+    is_plausible_isbn_match,
     parse_aria_series,
     parse_book_detail,
     parse_first_edition,
@@ -295,7 +296,26 @@ class GoodreadsExtractor:
     ) -> list[dict[str, Any]]:
         """Order candidates best-first, or trust the source for ISBN queries."""
         if isbn:
-            return candidates
+            # Goodreads' ordering stands, but a result that shares almost
+            # nothing with the title we asked for means the two providers
+            # disagree about what this ISBN denotes. Guessing which is right is
+            # worse than falling back to a documented source.
+            title, _ = split_title_by_author(query)
+            kept = [
+                candidate
+                for candidate in candidates
+                if is_plausible_isbn_match(
+                    title,
+                    str(candidate.get("bookTitleBare") or candidate.get("title") or ""),
+                )
+            ]
+            if len(kept) != len(candidates):
+                logger.info(
+                    "goodreads.isbn_mismatch_discarded",
+                    isbn=isbn,
+                    discarded=len(candidates) - len(kept),
+                )
+            return kept
 
         title, author = split_title_by_author(query)
         scored = [

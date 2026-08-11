@@ -28,6 +28,9 @@ from pipeline.extract.goodreads import (
     map_payload,
 )
 from pipeline.extract.goodreads_parsers import (
+    ISBN_SANITY_FLOOR,
+    MIN_TITLE_SIMILARITY,
+    is_plausible_isbn_match,
     parse_aria_series,
     parse_json_ld,
     parse_series_id,
@@ -462,21 +465,35 @@ class TestResolve:
             assert await extractor.resolve(client, "Zzyzx") is None
 
     @respx.mock
-    async def test_an_isbn_query_bypasses_the_similarity_threshold(
+    async def test_an_isbn_query_bypasses_the_ranking_threshold(
         self, extractor: GoodreadsExtractor
     ) -> None:
-        # An ISBN is an exact identifier; Goodreads' own ordering is better
-        # evidence than string similarity against a title we may have wrong.
+        # An ISBN is an exact identifier, so Goodreads' own answer beats string
+        # similarity against a title we may have wrong. "Dune Messiah" scores
+        # 0.67 against "Dune": under the 0.75 ranking threshold, so a title
+        # query rejects it, and over the 0.3 sanity floor, so an ISBN query
+        # keeps it.
         respx.get(AUTOCOMPLETE).mock(
-            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "bookId": "1",
+                        "title": "Dune Messiah",
+                        "bookTitleBare": "Dune Messiah",
+                    }
+                ],
+            )
         )
         respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
         respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
 
         async with extractor.build_client() as client:
-            book = await extractor.resolve(client, "totally unrelated text", isbn="9780553380163")
+            by_title = await extractor.resolve(client, "Dune")
+            by_isbn = await extractor.resolve(client, "Dune", isbn="9780441172719")
 
-        assert book is not None
+        assert by_title is None
+        assert by_isbn is not None
 
     @respx.mock
     async def test_the_second_call_is_served_from_cache(
@@ -653,3 +670,105 @@ class TestEnrichmentReplay:
         assert isinstance(book, RawBook)
         assert book.series[0].confirmed is False
         assert book.isbns == []
+
+
+class TestIsbnSanityFloor:
+    """A loose guard on ISBN lookups.
+
+    ISBN queries skip ranking because an exact identifier is better evidence
+    than string similarity against a title we may have wrong. But providers can
+    disagree about which book an ISBN denotes, and when the answer shares
+    almost nothing with what was asked for, one of them is wrong — falling back
+    to a documented source beats guessing which.
+    """
+
+    @respx.mock
+    async def test_a_grossly_different_title_is_discarded(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "bookId": "1",
+                        "title": "A Completely Different Book",
+                        "bookTitleBare": "A Completely Different Book",
+                    }
+                ],
+            )
+        )
+
+        async with extractor.build_client() as client:
+            assert await extractor.resolve(client, "Dune", isbn="9780441172719") is None
+
+    @respx.mock
+    async def test_a_matching_title_is_kept(self, extractor: GoodreadsExtractor) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"bookId": "1", "title": "Dune", "bookTitleBare": "Dune"}],
+            )
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "Dune", isbn="9780441172719")
+
+        assert book is not None
+
+    @respx.mock
+    async def test_a_fuller_subtitle_is_still_accepted(self, extractor: GoodreadsExtractor) -> None:
+        # Goodreads routinely holds a longer title than a dump edition does.
+        # The floor is loose precisely so this is not mistaken for a mismatch.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "bookId": "1",
+                        "title": "A Brief History of Time",
+                        "bookTitleBare": (
+                            "A Brief History of Time: From the Big Bang to Black Holes"
+                        ),
+                    }
+                ],
+            )
+        )
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            book = await extractor.resolve(client, "A Brief History of Time", isbn="9780553380163")
+
+        assert book is not None
+
+    def test_the_floor_is_far_below_the_ranking_threshold(self) -> None:
+        # They answer different questions: one asks "is this the same book",
+        # the other "which of these is the best match".
+        assert ISBN_SANITY_FLOOR < MIN_TITLE_SIMILARITY
+
+    @pytest.mark.parametrize(
+        ("ours", "theirs", "plausible"),
+        [
+            ("Dune", "Dune", True),
+            ("Dune", "Dune Messiah", True),
+            ("A Brief History of Time", "A Brief History of Time: From the Big Bang", True),
+            ("Social Psychology", "Social Psychology: Study Guide", True),
+            ("Dune", "The Wind in the Willows", False),
+            ("Herbs and Spices", "Quantum Chromodynamics", False),
+        ],
+    )
+    def test_what_the_floor_does_and_does_not_catch(
+        self, ours: str, theirs: str, plausible: bool
+    ) -> None:
+        # Documented rather than asserted in prose: a companion volume with a
+        # similar title passes, because it is indistinguishable from a provider
+        # holding a fuller subtitle.
+        assert is_plausible_isbn_match(ours, theirs) is plausible
+
+    def test_an_empty_title_is_not_grounds_for_rejection(self) -> None:
+        # Nothing to compare is not evidence of a mismatch.
+        assert is_plausible_isbn_match("", "Anything")
+        assert is_plausible_isbn_match("Anything", "")
