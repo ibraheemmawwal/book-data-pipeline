@@ -9,6 +9,10 @@ Partition markers are pure boundary signals. They deliberately carry no record
 count: extractor retries reproduce records and DLQ routing removes them, so
 produced, transformed and loaded counts differ by design. Counts are
 observability, not a completion condition.
+
+A marker does carry ``partition_count`` — topology rather than data. Consumers
+decide completion by comparing durably recorded markers against that number, so
+a topic resized between runs cannot stall a run or finalise it early.
 """
 
 from __future__ import annotations
@@ -125,6 +129,12 @@ class PartitionMarker(_Envelope):
     topic: str = Field(min_length=1)
     partition: int = Field(ge=0)
 
+    # The number of partitions the barrier actually wrote to for this run.
+    # Completion compares durably recorded markers against this number rather
+    # than re-reading broker metadata, so a topic resized between runs can
+    # neither stall a run forever nor finalise one early.
+    partition_count: int = Field(gt=0)
+
     @field_validator("event_type")
     @classmethod
     def _must_be_a_marker(cls, value: EventType) -> EventType:
@@ -132,6 +142,21 @@ class PartitionMarker(_Envelope):
             msg = "a PartitionMarker must use the run.partition_complete event_type"
             raise ValueError(msg)
         return value
+
+    @model_validator(mode="after")
+    def _partition_is_within_the_topology(self) -> Self:
+        """Partition 3 of a three-partition topic does not exist.
+
+        Recording an observation for it would leave a run permanently one
+        marker short of a boundary it can never reach.
+        """
+        if self.partition >= self.partition_count:
+            msg = (
+                f"partition {self.partition} is outside a topic with "
+                f"partition_count {self.partition_count}"
+            )
+            raise ValueError(msg)
+        return self
 
 
 def decode_event(data: bytes) -> BookEvent | PartitionMarker:
