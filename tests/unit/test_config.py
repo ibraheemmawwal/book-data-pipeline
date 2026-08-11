@@ -207,3 +207,30 @@ class TestBlankSecrets:
 
         assert loaded.googlebooks_api_key is None
         assert SourceName.GOOGLEBOOKS not in loaded.active_sources()
+
+
+class TestDiscoverySettings:
+    def test_the_language_filter_is_parsed_from_a_comma_list(self) -> None:
+        assert settings(discovery_languages="eng, fra ,deu").discovery_language_set() == (
+            frozenset({"eng", "fra", "deu"})
+        )
+
+    def test_an_empty_language_list_means_no_filter(self) -> None:
+        # None rather than an empty set: an empty set would match nothing and
+        # silently discover zero candidates.
+        assert settings(discovery_languages="").discovery_language_set() is None
+
+    def test_a_pinned_digest_is_normalised(self) -> None:
+        loaded = settings(openlibrary_dump_sha256="A" * 64)
+
+        assert loaded.openlibrary_dump_sha256 == "a" * 64
+
+    @pytest.mark.parametrize("bad", ["abc", "z" * 64, "a" * 63, "a" * 65])
+    def test_a_malformed_digest_is_refused_at_startup(self, bad: str) -> None:
+        # Discovering for an hour and then failing verification is a much worse
+        # way to learn someone pasted a truncated hash.
+        with pytest.raises(ValidationError, match="openlibrary_dump_sha256"):
+            settings(openlibrary_dump_sha256=bad)
+
+    def test_an_absent_digest_is_allowed(self) -> None:
+        assert settings().openlibrary_dump_sha256 is None
