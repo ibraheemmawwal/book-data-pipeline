@@ -24,6 +24,38 @@ Gutendex supplies most records and publishes no ISBNs at all, so the ISBN-less p
 the common case rather than an edge case. Provenance is kept in `book_sources` so a book
 seen by several providers stays one canonical row without discarding where it came from.
 
+## Quickstart
+
+```bash
+docker compose up -d
+open http://localhost:8080        # Airflow, admin/admin
+```
+
+That is the whole setup. Both databases are created and migrated by init
+services — there is no manual SQL — and the stack needs no credentials: Google
+Books skips observably without a key, and Goodreads stays off unless two
+explicit flags are set.
+
+Trigger a run:
+
+```bash
+docker compose exec airflow-scheduler airflow dags trigger book_ingestion
+```
+
+It ships with a tiny captured dump sample so this works immediately. For a real
+run, download an `ol_dump_editions_*.txt.gz` and point at it:
+
+```bash
+PIPELINE_OPENLIBRARY_DUMP_PATH=/path/to/ol_dump_editions_2026-01-01.txt.gz \
+PIPELINE_OPENLIBRARY_DUMP_SHA256=<digest> docker compose up -d
+```
+
+The two databases are deliberately separate. Airflow's metadata database is
+Airflow's business, and its schema belongs to whichever Airflow version is
+running; putting the catalogue in there would couple a data migration to an
+Airflow upgrade and hand the scheduler write access to the thing it is meant to
+be orchestrating.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). Python 3.12 is installed by uv itself.

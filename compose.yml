@@ -1,0 +1,173 @@
+# One command from a clean clone. No manual SQL, no credentials required.
+#
+# The two databases are separate on purpose. Airflow's metadata database is
+# Airflow's business — it holds task instances, XCom and connections, and its
+# schema is owned by whatever Airflow version is running. Putting the catalogue
+# in there would couple a data migration to an Airflow upgrade and hand the
+# scheduler write access to the thing it is supposed to be orchestrating.
+
+name: book-data-pipeline
+
+x-pipeline-env: &pipeline-env
+  PIPELINE_DATABASE_URL: postgresql+psycopg://catalogue:catalogue@catalogue-db:5432/catalogue
+  PIPELINE_OPENLIBRARY_CONTACT_EMAIL: ${PIPELINE_OPENLIBRARY_CONTACT_EMAIL:-you@example.com}
+  PIPELINE_DISCOVERY_MANIFEST_PATH: /staging/candidates.jsonl
+  PIPELINE_STAGING_DIR: /staging
+  # A tiny captured sample so the stack is runnable the moment it starts. A
+  # real run points this at a downloaded ol_dump_editions_*.txt.gz; see the
+  # README. Shipping a default means "clone and trigger the DAG" works without
+  # first waiting on a multi-gigabyte download.
+  PIPELINE_OPENLIBRARY_DUMP_PATH: ${PIPELINE_OPENLIBRARY_DUMP_PATH:-/samples/ol_dump_editions_sample.txt.gz}
+  PIPELINE_DISCOVERY_MAX_CANDIDATES: ${PIPELINE_DISCOVERY_MAX_CANDIDATES:-500}
+  # Absent by default. The adapter skips observably rather than failing, which
+  # is what keeps a clean clone runnable with no credentials at all.
+  PIPELINE_GOOGLEBOOKS_API_KEY: ${PIPELINE_GOOGLEBOOKS_API_KEY:-}
+  # Both false unless deliberately overridden. Goodreads is an unofficial
+  # contract used under an accepted risk; a default clone must never touch it.
+  PIPELINE_GOODREADS_ENABLED: ${PIPELINE_GOODREADS_ENABLED:-false}
+  PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED: ${PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED:-false}
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  environment:
+    &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-local-development-only}
+    # Airflow 3 runs tasks against the Task Execution API rather than letting
+    # them touch the metadata database directly. Workers default to localhost,
+    # which is nothing inside the scheduler container — without this every task
+    # fails with a bare "Connection refused" and no hint at the cause.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Every process must sign and verify with the same secret, or the worker's
+    # token is rejected by the api-server and the task fails with "Invalid auth
+    # token" — which says nothing about the two containers disagreeing.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-development-only}
+    AIRFLOW__CORE__FERNET_KEY: ""
+    <<: *pipeline-env
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./tests/fixtures:/samples:ro
+    - airflow-logs:/opt/airflow/logs
+    - staging:/staging
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+    staging-init:
+      condition: service_completed_successfully
+
+services:
+  # --- databases ---------------------------------------------------------
+  catalogue-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: catalogue
+      POSTGRES_PASSWORD: catalogue
+      POSTGRES_DB: catalogue
+    volumes:
+      - catalogue-data:/var/lib/postgresql/data
+    ports:
+      - "${CATALOGUE_DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalogue -d catalogue"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  airflow-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --- one-shot initialisation -------------------------------------------
+  staging-init:
+    image: busybox:1.37
+    # The Airflow image runs as uid 50000 and the pipeline image as its own
+    # system user; a named volume arrives root-owned, so neither can write to
+    # it. They share this directory by design — Airflow writes the manifest and
+    # the pipeline reads it — so it is opened up once here rather than giving
+    # either container root.
+    command: ["sh", "-c", "mkdir -p /staging && chmod 0777 /staging"]
+    volumes:
+      - staging:/staging
+    restart: "no"
+
+  catalogue-migrate:
+    build:
+      context: .
+      dockerfile: docker/pipeline.Dockerfile
+    # Idempotent: alembic upgrade head is a no-op on an already-current
+    # database, so restarting the stack costs nothing and needs no manual SQL.
+    entrypoint: ["alembic", "upgrade", "head"]
+    environment: *pipeline-env
+    depends_on:
+      catalogue-db:
+        condition: service_healthy
+      staging-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - airflow db migrate && airflow version
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    restart: "no"
+
+  # --- airflow -----------------------------------------------------------
+  # Airflow 3 splits these into separate processes; with LocalExecutor the
+  # api-server, scheduler and dag-processor are all required.
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      catalogue-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+
+volumes:
+  catalogue-data:
+  airflow-data:
+  airflow-logs:
+  staging:
