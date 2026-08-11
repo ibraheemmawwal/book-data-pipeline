@@ -80,6 +80,9 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # Assertions and magic values are the point of a test suite.
 "tests/**" = ["PLR2004", "ARG001"]
+# Alembic writes these. Reformatting generated DDL by hand invites a typo in
+# the one file whose correctness cannot be checked by reading the diff.
+"migrations/versions/*" = ["E501"]
 # These modules exist to fold ambiguous Unicode punctuation into its plain
 # equivalents, so the "ambiguous character" they are flagged for is the input
 # they are written to handle. Silencing it here rather than project-wide keeps

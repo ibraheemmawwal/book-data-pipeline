@@ -43,10 +43,13 @@ logger = structlog.get_logger(__name__)
 COVER_MIME = "image/jpeg"
 
 
+SOURCE = SourceName.GUTENDEX
+
+
 class GutendexExtractor:
     """Fetches book records from a Gutendex instance."""
 
-    source_name = SourceName.GUTENDEX
+    source_name = SOURCE
 
     def __init__(
         self, settings: Settings, *, base_delay: float = DEFAULT_BASE_DELAY_SECONDS
@@ -119,42 +122,7 @@ class GutendexExtractor:
                 params = None
 
     def _to_item(self, payload: object) -> ExtractedItem:
-        """Map one source record, turning any failure into a rejection.
-
-        Never raises. One malformed record must cost that record, not the page.
-        """
-        record: dict[str, Any] | None = None
-        source_id: object = None
-        try:
-            record = require_object(payload, "record")
-            source_id = record.get("id")
-            authors = [_to_author(author) for author in optional_list(record, "authors")]
-            formats = optional_object(record, "formats")
-            return RawBook(
-                source=self.source_name,
-                source_id=source_id,  # type: ignore[arg-type]
-                title=record.get("title"),  # type: ignore[arg-type]
-                authors=authors,
-                subjects=string_list(record, "subjects"),
-                languages=string_list(record, "languages"),
-                description=_first_non_empty(string_list(record, "summaries")),
-                cover_url=formats.get(COVER_MIME),
-                download_count=record.get("download_count"),
-                raw_payload=record,
-            )
-        except (InvalidSourceRecordError, ValidationError) as error:
-            logger.warning(
-                "gutendex.record_rejected",
-                source_id=source_id,
-                errors=error.error_count() if isinstance(error, ValidationError) else 1,
-            )
-            return Rejected(
-                source=self.source_name,
-                source_id=str(source_id) if source_id is not None else None,
-                raw_payload=payload,
-                rejection_code="invalid_record",
-                detail=record_error_detail(error),
-            )
+        return map_payload(payload)
 
 
 def _to_author(payload: object) -> RawAuthor:
@@ -169,3 +137,42 @@ def _to_author(payload: object) -> RawAuthor:
 def _first_non_empty(values: list[str]) -> str | None:
     """The first non-blank entry, or None."""
     return next((value for value in values if value.strip()), None)
+
+
+def map_payload(payload: object) -> ExtractedItem:
+    """Map one source record, turning any failure into a rejection.
+
+    Never raises. One malformed record must cost that record, not the page.
+    """
+    record: dict[str, Any] | None = None
+    source_id: object = None
+    try:
+        record = require_object(payload, "record")
+        source_id = record.get("id")
+        authors = [_to_author(author) for author in optional_list(record, "authors")]
+        formats = optional_object(record, "formats")
+        return RawBook(
+            source=SOURCE,
+            source_id=source_id,  # type: ignore[arg-type]
+            title=record.get("title"),  # type: ignore[arg-type]
+            authors=authors,
+            subjects=string_list(record, "subjects"),
+            languages=string_list(record, "languages"),
+            description=_first_non_empty(string_list(record, "summaries")),
+            cover_url=formats.get(COVER_MIME),
+            download_count=record.get("download_count"),
+            raw_payload=record,
+        )
+    except (InvalidSourceRecordError, ValidationError) as error:
+        logger.warning(
+            "gutendex.record_rejected",
+            source_id=source_id,
+            errors=error.error_count() if isinstance(error, ValidationError) else 1,
+        )
+        return Rejected(
+            source=SOURCE,
+            source_id=str(source_id) if source_id is not None else None,
+            raw_payload=payload,
+            rejection_code="invalid_record",
+            detail=record_error_detail(error),
+        )
