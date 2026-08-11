@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Computed,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     SmallInteger,
     Table,
     Text,
@@ -43,7 +45,7 @@ NAMING_CONVENTION = {
 
 metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
-SOURCE_NAMES = ("gutendex", "openlibrary", "googlebooks")
+SOURCE_NAMES = ("goodreads", "openlibrary", "googlebooks", "gutendex")
 RUN_STATUSES = ("running", "processing", "success", "partial_success", "failed")
 SOURCE_RUN_STATUSES = ("running", "success", "skipped", "failed")
 REJECTION_STAGES = ("extract", "transform", "load")
@@ -59,6 +61,7 @@ def _in_list(column: str, values: tuple[str, ...]) -> str:
 # the description, or search returns whatever mentions the word most often.
 SEARCH_VECTOR = (
     "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+    "setweight(to_tsvector('english', coalesce(series_search_text, '')), 'A') || "
     "setweight(to_tsvector('english', coalesce(subtitle, '')), 'B') || "
     "setweight(to_tsvector('english', coalesce(description, '')), 'C')"
 )
@@ -76,9 +79,15 @@ books = Table(
     Column("publisher", Text),
     Column("page_count", Integer),
     Column("download_count", BigInteger),
+    Column("goodreads_average_rating", Numeric(3, 2)),
     Column("language", Text),
     Column("description", Text),
     Column("cover_url", Text),
+    # A deterministic projection of the canonical series names attached to this
+    # book. Denormalised so the stored generated search_vector can match a
+    # series without triggers aggregating across tables; the loader is the only
+    # writer and recomputes it in the same transaction as the relationship.
+    Column("series_search_text", Text, nullable=False, server_default=text("''")),
     # Fingerprint of the canonical fields, so an unchanged record does not
     # touch updated_at and re-running the pipeline is genuinely a no-op.
     Column("content_hash", Text, nullable=False),
@@ -94,6 +103,10 @@ books = Table(
     CheckConstraint(
         "download_count IS NULL OR download_count >= 0", name="download_count_non_negative"
     ),
+    CheckConstraint(
+        "goodreads_average_rating IS NULL OR goodreads_average_rating BETWEEN 0 AND 5",
+        name="goodreads_average_rating_range",
+    ),
     CheckConstraint("language IS NULL OR language ~ '^[a-z]{3}$'", name="language_format"),
 )
 
@@ -107,6 +120,12 @@ Index(
     books.c.title,
     postgresql_using="gin",
     postgresql_ops={"title": "gin_trgm_ops"},
+)
+Index(
+    "idx_books_series_text_trgm",
+    books.c.series_search_text,
+    postgresql_using="gin",
+    postgresql_ops={"series_search_text": "gin_trgm_ops"},
 )
 
 book_sources = Table(
@@ -205,6 +224,83 @@ book_subjects = Table(
     Column("book_id", BigInteger, ForeignKey("books.id", ondelete="CASCADE"), primary_key=True),
     Column(
         "subject_id", BigInteger, ForeignKey("subjects.id", ondelete="CASCADE"), primary_key=True
+    ),
+)
+
+series = Table(
+    "series",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("identity_key", Text, nullable=False, unique=True),
+    Column("name", Text, nullable=False),
+    Column("normalized_name", Text, nullable=False),
+    Column("description", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index(
+    "idx_series_name_trgm",
+    series.c.name,
+    postgresql_using="gin",
+    postgresql_ops={"name": "gin_trgm_ops"},
+)
+
+series_sources = Table(
+    "series_sources",
+    metadata,
+    Column("series_id", BigInteger, ForeignKey("series.id", ondelete="CASCADE"), nullable=False),
+    Column("source", Text, primary_key=True),
+    Column("source_series_id", Text, primary_key=True),
+    Column("raw_payload", JSONB, nullable=False),
+    Column("payload_hash", Text, nullable=False),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(_in_list("source", SOURCE_NAMES), name="source_known"),
+)
+
+Index("idx_series_sources_series_id", series_sources.c.series_id)
+
+book_series = Table(
+    "book_series",
+    metadata,
+    Column("book_id", BigInteger, ForeignKey("books.id", ondelete="CASCADE"), primary_key=True),
+    Column("series_id", BigInteger, ForeignKey("series.id", ondelete="CASCADE"), primary_key=True),
+    # Numeric, not float: 0.5 and 2.5 are exact positions a reader sees on the
+    # cover, and binary rounding would make them compare unequal.
+    Column("position", Numeric(8, 2)),
+    # Whether a matching /series/ link confirmed this, or it was inferred from
+    # title text. A guess must never outrank evidence during merge.
+    Column("confirmed", Boolean, nullable=False, server_default=text("false")),
+    CheckConstraint("position IS NULL OR position >= 0", name="position_non_negative"),
+)
+
+book_series_sources = Table(
+    "book_series_sources",
+    metadata,
+    Column("book_id", BigInteger, nullable=False),
+    Column("series_id", BigInteger, nullable=False),
+    Column("source", Text, primary_key=True),
+    Column("source_book_id", Text, primary_key=True),
+    Column("source_series_id", Text, primary_key=True),
+    Column("position", Numeric(8, 2)),
+    Column("confirmed", Boolean, nullable=False, server_default=text("false")),
+    Column("raw_payload", JSONB, nullable=False),
+    CheckConstraint("position IS NULL OR position >= 0", name="position_non_negative"),
+    ForeignKeyConstraint(
+        ["source", "source_book_id"],
+        ["book_sources.source", "book_sources.source_id"],
+        ondelete="CASCADE",
+    ),
+    ForeignKeyConstraint(
+        ["source", "source_series_id"],
+        ["series_sources.source", "series_sources.source_series_id"],
+        ondelete="CASCADE",
+    ),
+    ForeignKeyConstraint(
+        ["book_id", "series_id"],
+        ["book_series.book_id", "book_series.series_id"],
+        ondelete="CASCADE",
     ),
 )
 
@@ -307,6 +403,8 @@ __all__ = [
     "author_sources",
     "authors",
     "book_authors",
+    "book_series",
+    "book_series_sources",
     "book_sources",
     "book_subjects",
     "books",
@@ -315,6 +413,8 @@ __all__ = [
     "rejected_records",
     "run_partition_markers",
     "run_topic_partitions",
+    "series",
+    "series_sources",
     "source_runs",
     "subjects",
 ]

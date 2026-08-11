@@ -38,6 +38,11 @@ def clean(source: SourceName = SourceName.GUTENDEX, **overrides: Any) -> CleanBo
 SHARED_ISBN = "9780553380163"
 
 
+def candidate_for(source: SourceName, **overrides: Any) -> CleanBook:
+    """A candidate pinned to SHARED_ISBN."""
+    return candidate(source, **overrides)
+
+
 def candidate(source: SourceName, **overrides: Any) -> CleanBook:
     """A merge candidate pinned to one canonical identity.
 
@@ -293,3 +298,41 @@ class TestMergePrecedence:
 
         with pytest.raises(ValueError, match="identity"):
             merge_candidates([a, b])
+
+
+class TestIdentityAgreementGuard:
+    def test_a_candidate_isbn_conflicting_with_the_retained_row_is_refused(self) -> None:
+        # Forcing a candidate onto a different book's ISBN identity would fuse
+        # two genuinely different books into a row nothing could separate.
+        with pytest.raises(ValueError, match="conflicts with target identity"):
+            merge_candidates(
+                [candidate(SourceName.GOOGLEBOOKS)],
+                target_identity_key="isbn:9780441172719",
+            )
+
+    def test_candidates_disagreeing_on_isbn_are_refused(self) -> None:
+        one = candidate(SourceName.GOOGLEBOOKS)
+        other = clean(SourceName.OPENLIBRARY, isbns=["9780441172719"])
+
+        with pytest.raises(ValueError, match="conflicting ISBN identities"):
+            merge_candidates([one, other])
+
+    def test_a_fallback_candidate_is_promoted_to_the_retained_isbn(self) -> None:
+        # The stored row is the arbiter after a merge has already happened.
+        merged = merge_candidates(
+            [candidate(SourceName.GUTENDEX)],
+            target_identity_key="isbn:" + SHARED_ISBN,
+        )
+
+        assert merged.identity_key == "isbn:" + SHARED_ISBN
+
+    def test_an_author_whose_name_normalises_away_is_skipped(self) -> None:
+        # RawBook forbids a blank name, so this is the case where a name is
+        # non-blank but has no comparison form. A blank normalised name would
+        # collide with every other blank one.
+        # "." is non-blank but strips to nothing once punctuation is folded.
+        record = raw(authors=[RawAuthor(name="Melville, Herman"), RawAuthor(name=".")])
+        result = canonicalise(record)
+
+        assert isinstance(result, CleanBook)
+        assert [a.name for a in result.authors] == ["Melville, Herman"]

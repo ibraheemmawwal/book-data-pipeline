@@ -12,6 +12,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from pipeline.transform.normalise import (
+    _roman_to_int,
     normalise_author,
     normalise_language,
     normalise_subject,
@@ -232,3 +233,33 @@ class TestNormaliseSubject:
     def test_is_idempotent(self, value: str) -> None:
         once = normalise_subject(value)
         assert normalise_subject(once) == once
+
+
+class TestNormaliseEdgeCases:
+    @pytest.mark.parametrize("value", ["IIII", "VV", "IC", "XM"])
+    def test_non_canonical_roman_numerals_are_refused(self, value: str) -> None:
+        # IIII parses arithmetically to 4, but 4 renders as IV, so it was never
+        # a numeral. The round trip is what keeps ordinary words out.
+        assert parse_year(value) is None
+
+    def test_a_roman_numeral_containing_a_non_roman_letter_is_refused(self) -> None:
+        assert parse_year("MCMXCVIIZ") is None
+
+    @pytest.mark.parametrize("code", ["qqq", "xx", "zzz"])
+    def test_an_unassigned_language_code_returns_none(self, code: str) -> None:
+        # pycountry raises rather than returning None for some inputs; a
+        # missing language must never become an exception mid-batch.
+        assert normalise_language(code) is None
+
+    def test_a_language_code_of_the_wrong_length_returns_none(self) -> None:
+        assert normalise_language("engl") is None
+
+
+class TestRomanNumeralGuards:
+    def test_a_numeral_containing_an_unknown_letter_is_refused(self) -> None:
+        # The regex allows only Roman letters, so this exercises the guard that
+        # protects _roman_to_int when called on anything else.
+        assert _roman_to_int("MCMZ") is None
+
+    def test_an_empty_numeral_is_refused(self) -> None:
+        assert _roman_to_int("") is None

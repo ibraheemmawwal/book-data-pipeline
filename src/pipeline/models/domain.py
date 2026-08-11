@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Self
 
@@ -40,12 +41,15 @@ _FALLBACK_IDENTITY_PREFIX = "fallback:"
 class SourceName(StrEnum):
     """The providers this pipeline is allowed to ingest from.
 
-    Ordered by canonical-field priority: where two sources disagree and both
-    look equally complete, the earlier one wins.
+    Declaration order is canonical-field priority. Goodreads leads because it
+    is the preferred resolver for title, author, description, series and
+    edition facts; the documented APIs fill what it does not supply, and
+    Gutendex is a last resort rather than a peer.
     """
 
-    OPENLIBRARY = "openlibrary"
+    GOODREADS = "goodreads"
     GOOGLEBOOKS = "googlebooks"
+    OPENLIBRARY = "openlibrary"
     GUTENDEX = "gutendex"
 
 
@@ -105,6 +109,67 @@ class RawAuthor(_Frozen):
         return self
 
 
+class CandidateBook(_Frozen):
+    """A book worth resolving, discovered from the Open Library dump.
+
+    Not yet a canonical book, and deliberately not a ``RawBook``: discovery
+    says "this exists and here is enough to look it up", which is a weaker
+    claim than "a source observed these fields". The retained discovery payload
+    can still become a provenance-bearing fallback observation, but only after
+    passing the same validation as any API result.
+    """
+
+    candidate_key: NonBlankStr
+    title: NonBlankStr
+    authors: list[str] = Field(default_factory=list)
+    isbns: list[str] = Field(default_factory=list)
+    openlibrary_work_key: str | None = None
+    openlibrary_edition_key: str | None = None
+    languages: list[str] = Field(default_factory=list)
+    discovery_payload: dict[str, Any] = Field(default_factory=dict)
+
+    def lookup_query(self) -> str:
+        """The string a title/author resolver should search for."""
+        return f"{self.title} by {self.authors[0]}" if self.authors else self.title
+
+    def preferred_isbn(self) -> str | None:
+        """The ISBN to resolve by, if the candidate carries a usable one."""
+        return self.isbns[0] if self.isbns else None
+
+
+class RawSeriesMembership(_Frozen):
+    """A series relationship exactly as one source reported it.
+
+    ``position`` stays a string here because sources write it as ``1``, ``0.5``
+    and ``2.5``, and parsing belongs in transform with the other coercions.
+    ``confirmed`` records *how* the relationship was established: a matching
+    /series/ link is evidence, a name parsed out of a title is a guess, and
+    conflating them would let a guess outrank a fact during merge.
+    """
+
+    name: NonBlankStr
+    source_series_id: str | None = None
+    position: str | None = None
+    confirmed: bool = False
+
+
+class CleanSeriesMembership(_Frozen):
+    """A validated series relationship with a decoded name and exact position.
+
+    HTML entity decoding happens before normalisation, so encoded residue can
+    never end up inside a join key.
+    """
+
+    identity_key: NonBlankStr
+    name: NonBlankStr
+    normalised_name: NonBlankStr
+    source_series_id: str | None = None
+    # Decimal, not float: series positions like 0.5 and 2.5 are exact values a
+    # reader can see, and binary rounding would make them compare unequal.
+    position: Decimal | None = Field(default=None, ge=0)
+    confirmed: bool = False
+
+
 class RawBook(_Frozen):
     """One source's account of one book, before normalisation.
 
@@ -133,9 +198,14 @@ class RawBook(_Frozen):
     description: str | None = None
     cover_url: str | None = None
 
-    # Gutendex only. The single popularity signal any source gives us, and the
-    # basis for the catalogue's ranking analytics.
+    # Gutendex only. Provider-specific by name so no other source's relevance
+    # or sales signal can be relabelled as downloads.
     download_count: Annotated[int, Field(ge=0)] | None = None
+
+    # Goodreads only, and named for its provider for the same reason.
+    goodreads_average_rating: Annotated[Decimal, Field(ge=0, le=5)] | None = None
+
+    series: list[RawSeriesMembership] = Field(default_factory=list)
 
     source_updated: datetime | None = None
     raw_payload: dict[str, Any]
@@ -180,6 +250,9 @@ class CleanBook(_Frozen):
     description: str | None = None
     cover_url: str | None = None
     download_count: Annotated[int, Field(ge=0)] | None = None
+    goodreads_average_rating: Annotated[Decimal, Field(ge=0, le=5)] | None = None
+
+    series: list[CleanSeriesMembership] = Field(default_factory=list)
 
     authors: list[RawAuthor] = Field(default_factory=list)
     normalised_first_author: str | None = None

@@ -109,9 +109,31 @@ class TestUserAgent:
 
 class TestActiveSources:
     def test_all_sources_active_when_configured(self) -> None:
-        active = settings(googlebooks_api_key="test-key").active_sources()
+        active = settings(
+            googlebooks_api_key="test-key",
+            goodreads_enabled=True,
+            goodreads_unofficial_source_accepted=True,
+        ).active_sources()
 
-        assert active == (SourceName.GUTENDEX, SourceName.OPENLIBRARY, SourceName.GOOGLEBOOKS)
+        # Resolution order, not the SourceName declaration order: Goodreads
+        # resolves first, documented APIs fill gaps, Gutendex is last resort.
+        assert active == (
+            SourceName.GOODREADS,
+            SourceName.OPENLIBRARY,
+            SourceName.GOOGLEBOOKS,
+            SourceName.GUTENDEX,
+        )
+
+    def test_goodreads_is_off_unless_both_gates_are_set(self) -> None:
+        # Reading an unofficial contract must never be a default.
+        assert SourceName.GOODREADS not in settings().active_sources()
+        assert SourceName.GOODREADS not in settings(goodreads_enabled=True).active_sources()
+
+    def test_enabling_without_accepting_the_risk_says_so(self) -> None:
+        reason = settings(goodreads_enabled=True).skip_reason(SourceName.GOODREADS)
+
+        assert reason is not None
+        assert "risk has not been accepted" in reason
 
     def test_googlebooks_is_skipped_without_a_key(self) -> None:
         loaded = settings(googlebooks_enabled=True, googlebooks_api_key=None)
@@ -173,3 +195,15 @@ class TestEnvironmentLoading:
         loaded = settings(googlebooks_api_key="super-secret-key")
 
         assert "super-secret-key" not in repr(loaded)
+
+
+class TestBlankSecrets:
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_a_blank_api_key_reads_as_absent(self, blank: str) -> None:
+        # PIPELINE_GOOGLEBOOKS_API_KEY= in an env file means "not configured".
+        # An empty string would read as present-but-invalid and turn a clean
+        # skip into a 400 from Google.
+        loaded = settings(googlebooks_api_key=blank)
+
+        assert loaded.googlebooks_api_key is None
+        assert SourceName.GOOGLEBOOKS not in loaded.active_sources()

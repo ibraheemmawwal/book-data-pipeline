@@ -9,7 +9,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from pipeline.models.domain import CleanBook, RawAuthor, RawBook, SourceName
+from pipeline.models.domain import (
+    CleanBook,
+    RawAuthor,
+    RawBook,
+    SourceName,
+    is_isbn_identity,
+)
 
 
 def raw_kwargs(**overrides: object) -> dict[str, object]:
@@ -267,3 +273,28 @@ class TestLanguagesArePreserved:
 
     def test_absent_languages_default_to_empty(self) -> None:
         assert RawBook(**raw_kwargs()).languages == []  # type: ignore[arg-type]
+
+
+class TestIdentityHelpers:
+    def test_has_canonical_isbn_is_true_only_with_an_isbn(self) -> None:
+        with_isbn = CleanBook(**clean_kwargs())  # type: ignore[arg-type]
+        without = CleanBook(
+            **clean_kwargs(isbn13=None, identity_key="fallback:" + "a" * 64)  # type: ignore[arg-type]
+        )
+
+        assert with_isbn.has_canonical_isbn()
+        assert not without.has_canonical_isbn()
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("isbn:9780553380163", True),
+            ("fallback:" + "a" * 64, False),
+            ("isbn:97805533801", False),
+            ("", False),
+        ],
+    )
+    def test_is_isbn_identity_recognises_only_a_full_isbn_key(
+        self, key: str, expected: bool
+    ) -> None:
+        assert is_isbn_identity(key) is expected

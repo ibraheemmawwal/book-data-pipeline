@@ -39,13 +39,24 @@ MAX_LOAD_BATCH_SIZE = 1000
 # Politeness cap for Open Library. Deliberately a ceiling, not a default.
 MAX_OPENLIBRARY_REQUESTS_PER_SECOND = 1.0
 
+# Ceiling for the unofficial Goodreads integration. Politeness toward a source
+# whose terms restrict automated collection is not a tuning knob.
+MAX_GOODREADS_REQUESTS_PER_SECOND = 5.0
+
 ENV_PREFIX = "PIPELINE_"
 
 _ACCEPTED_DATABASE_SCHEMES = ("postgresql://", "postgresql+psycopg://")
 
 # Extraction order, which is not the canonical-priority order in SourceName.
 # Gutendex is the bulk source and runs first; the other two enrich.
-_EXTRACTION_ORDER = (SourceName.GUTENDEX, SourceName.OPENLIBRARY, SourceName.GOOGLEBOOKS)
+# Resolution order, which is not the SourceName declaration order. Goodreads
+# resolves first; the documented APIs fill gaps; Gutendex is a last resort.
+_EXTRACTION_ORDER = (
+    SourceName.GOODREADS,
+    SourceName.OPENLIBRARY,
+    SourceName.GOOGLEBOOKS,
+    SourceName.GUTENDEX,
+)
 
 
 class Settings(BaseSettings):
@@ -79,6 +90,9 @@ class Settings(BaseSettings):
     gutendex_enabled: bool = True
     gutendex_base_url: str = "https://gutendex.com"
     gutendex_max_records: Annotated[int, Field(ge=1)] = 6000
+    # Small on purpose: Gutendex is a last resort, and a Goodreads outage must
+    # not quietly promote it back to being the bulk source.
+    gutendex_max_last_resort_queries_per_run: Annotated[int, Field(ge=0)] = 200
 
     # --- Open Library -------------------------------------------------------
     openlibrary_enabled: bool = True
@@ -88,12 +102,39 @@ class Settings(BaseSettings):
         float, Field(gt=0, le=MAX_OPENLIBRARY_REQUESTS_PER_SECOND)
     ] = MAX_OPENLIBRARY_REQUESTS_PER_SECOND
     openlibrary_max_records: Annotated[int, Field(ge=1)] = 500
+    # Budget exhaustion is an observable skip, not permission to bulk-page a
+    # source whose guidance points at dumps for volume.
+    openlibrary_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
 
     # --- Google Books -------------------------------------------------------
     googlebooks_enabled: bool = True
     googlebooks_base_url: str = "https://www.googleapis.com"
     googlebooks_api_key: SecretStr | None = None
     googlebooks_max_records: Annotated[int, Field(ge=1)] = 500
+    # Kept below the cloud project quota so one upstream outage cannot spend a
+    # whole day's allowance in minutes.
+    googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
+
+    # --- Goodreads (unofficial; see the ADR) --------------------------------
+    # Both gates default to false. Goodreads ended public API access in 2020,
+    # so this integration reads undocumented web contracts under an explicitly
+    # accepted risk. A clean clone must run the documented-API path without it,
+    # and enabling it has to be a deliberate act rather than a default.
+    goodreads_enabled: bool = False
+    goodreads_unofficial_source_accepted: bool = False
+    goodreads_base_url: str = "https://www.goodreads.com"
+    # At most five request starts per second and one in flight. A lower
+    # observed safe rate wins; these are ceilings, not targets.
+    goodreads_requests_per_second: Annotated[
+        float, Field(gt=0, le=MAX_GOODREADS_REQUESTS_PER_SECOND)
+    ] = MAX_GOODREADS_REQUESTS_PER_SECOND
+    goodreads_max_in_flight: Annotated[int, Field(ge=1, le=1)] = 1
+    # Hard timeout: an unofficial contract must never hold a run open.
+    goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0
+    goodreads_circuit_failure_threshold: Annotated[int, Field(ge=1)] = 5
+    goodreads_title_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 3600
+    goodreads_isbn_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 86400
+    goodreads_min_match_score: Annotated[float, Field(ge=0, le=1)] = 0.4
 
     # --- Kafka (phase 2) ----------------------------------------------------
     kafka_bootstrap_servers: str = "localhost:9092"
@@ -179,6 +220,8 @@ class Settings(BaseSettings):
 
     def _is_enabled(self, source: SourceName) -> bool:
         match source:
+            case SourceName.GOODREADS:
+                return self.goodreads_enabled
             case SourceName.GUTENDEX:
                 return self.gutendex_enabled
             case SourceName.OPENLIBRARY:
@@ -215,4 +258,11 @@ class Settings(BaseSettings):
             return f"{source.value} is disabled by configuration"
         if source is SourceName.GOOGLEBOOKS and self.googlebooks_api_key is None:
             return "googlebooks is enabled but no API key is configured"
+        if source is SourceName.GOODREADS and not self.goodreads_unofficial_source_accepted:
+            # Two gates, not one. Enabling an unofficial source has to be a
+            # separate, deliberate acknowledgement of the documented risk.
+            return (
+                "goodreads is enabled but the unofficial-source risk has not been "
+                "accepted; set PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED=true"
+            )
         return None
