@@ -153,9 +153,15 @@ class KafkaSource:
         group_id: str,
         *,
         consumer_factory: Callable[[dict[str, Any]], Any] | None = None,
+        max_idle_polls: int | None = None,
     ) -> None:
         self._topics = topics
         self._running = True
+        # None means run forever, which is what a service wants. A number
+        # means stop after that many consecutive empty polls, which is what a
+        # drain-and-exit tool or a test wants — without it, a caller can only
+        # stop the loop from inside it, so a topic that goes quiet hangs.
+        self._max_idle_polls = max_idle_polls
 
         config = {
             "bootstrap.servers": bootstrap_servers,
@@ -177,10 +183,16 @@ class KafkaSource:
         retried into correctness, and blocking the partition on it would stop
         every well-formed event behind it.
         """
+        idle = 0
         while self._running:
             message = self._consumer.poll(POLL_TIMEOUT_SECONDS)
             if message is None:
+                idle += 1
+                if self._max_idle_polls is not None and idle >= self._max_idle_polls:
+                    logger.info("kafka_source.idle_stop", polls=idle)
+                    return
                 continue
+            idle = 0
             if message.error() is not None:
                 logger.warning("kafka_source.message_error", error=str(message.error()))
                 continue

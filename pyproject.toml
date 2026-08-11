@@ -43,6 +43,7 @@ dev = [
     "testcontainers[postgres,kafka]>=4.8,<5",
     "pre-commit>=4.0,<5",
     "pytest-asyncio>=0.24,<2",
+    "confluent-kafka>=2.6,<3",
 ]
 
 [build-system]
@@ -94,6 +95,9 @@ select = [
 # Same reason on the other side: these import Airflow and the DAG module only
 # after importorskip has confirmed the optional dependency is present.
 "tests/dag/*" = ["PLC0415"]
+# confluent_kafka and the broker container are imported inside tests so the
+# module still collects (and skips) when the client is not installed.
+"tests/integration/test_kafka_broker.py" = ["PLC0415"]
 # Alembic writes these from a template we do not control.
 "migrations/versions/*" = ["E501", "UP035", "UP007", "I001"]
 # These modules exist to fold ambiguous Unicode punctuation into its plain
@@ -133,6 +137,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: requires real services via testcontainers (deselect with -m 'not integration')",
     "dag: requires an Airflow installation",
+    "kafka: requires a Kafka broker via testcontainers",
 ]
 
 [tool.coverage.run]

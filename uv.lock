@@ -348,6 +348,7 @@ airflow = [
     { name = "apache-airflow" },
 ]
 dev = [
+    { name = "confluent-kafka" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -379,6 +380,7 @@ provides-extras = ["kafka"]
 [package.metadata.requires-dev]
 airflow = [{ name = "apache-airflow", specifier = "==3.3.*" }]
 dev = [
+    { name = "confluent-kafka", specifier = ">=2.6,<3" },
     { name = "hypothesis", specifier = ">=6.112,<7" },
     { name = "mypy", specifier = ">=1.13,<2" },
     { name = "pre-commit", specifier = ">=4.0,<5" },

@@ -9,5 +9,18 @@ from __future__ import annotations
 
 from pipeline.services.load_consumer import LoadConsumer, LoadStats
 from pipeline.services.transform_consumer import TransformConsumer, TransformStats
+from pipeline.services.wiring import (
+    build_load_consumer,
+    build_transform_consumer,
+    emit_run_boundary,
+)
 
-__all__ = ["LoadConsumer", "LoadStats", "TransformConsumer", "TransformStats"]
+__all__ = [
+    "LoadConsumer",
+    "LoadStats",
+    "TransformConsumer",
+    "TransformStats",
+    "build_load_consumer",
+    "build_transform_consumer",
+    "emit_run_boundary",
+]

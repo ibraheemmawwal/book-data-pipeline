@@ -101,6 +101,33 @@ jobs:
           include-hidden-files: true
           retention-days: 1
 
+  kafka-integration:
+    name: Kafka integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ${{ github.job }}
+      - run: uv sync --all-groups --no-group airflow
+      # A real broker, because the unit tests use a fake client and a fake
+      # cannot demonstrate the one guarantee that matters: an uncommitted
+      # offset really is redelivered.
+      - name: Run Kafka integration tests
+        run: >-
+          uv run pytest -m kafka -p no:randomly
+          --cov=src --cov-report= --cov-fail-under=0
+        env:
+          COVERAGE_FILE: .coverage.kafka
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-kafka
+          path: .coverage.kafka
+          include-hidden-files: true
+          retention-days: 1
+
   dag:
     name: Airflow DAG
     runs-on: ubuntu-latest
@@ -125,7 +152,7 @@ jobs:
   coverage:
     name: Combined coverage gate
     runs-on: ubuntu-latest
-    needs: [unit, postgres-integration]
+    needs: [unit, postgres-integration, kafka-integration]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -157,12 +184,12 @@ jobs:
 # nothing to run. A green job that asserts nothing is worse than an absent one.
 # They arrive with the milestone that gives them content:
 #
-#   kafka-integration  -> v2.0, with the first `-m integration` Kafka tests
-#   image              -> v1.0, with docker/pipeline.Dockerfile
+#   image              -> with a published image, not a locally built one
 #
 # The dag job is deliberately absent from `coverage.needs`: dags/ sits outside
 # src/ and contributes nothing the gate measures, so making the gate wait on it
-# would only slow the pipeline down.
+# would only slow the pipeline down. kafka-integration *is* in needs, because
+# it covers src/pipeline/messaging/kafka.py and nothing else does.
 #
 # When kafka-integration lands it must upload .coverage.kafka and be added to
 # this workflow's `coverage.needs`, or the gate will silently measure less than

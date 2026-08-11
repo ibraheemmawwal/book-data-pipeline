@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 import pipeline.ingest as ingest_module
-from pipeline import __version__
+from pipeline import __version__, services
 from pipeline.cli import build_parser, main
 
 
@@ -156,3 +156,69 @@ def _stub_ingestion(monkeypatch: pytest.MonkeyPatch, *, status: str) -> dict[str
 
     monkeypatch.setattr(ingest_module, "run_ingestion", fake_run)
     return seen
+
+
+class TestConsumerCommands:
+    """The v2.0 entry points.
+
+    Thin by design: each builds a service from settings and runs it, so the
+    tests check the wiring is reached and the exit code is honest. What the
+    services actually do is covered against a database and a broker.
+    """
+
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [("transform-consumer", "transform"), ("load-consumer", "load")],
+    )
+    def test_a_consumer_command_runs_its_service(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+        expected: str,
+    ) -> None:
+        _configure(monkeypatch, tmp_path)
+        built: list[str] = []
+
+        class Stub:
+            def run(self) -> Any:
+                return type("S", (), {"__dict__": {}})()
+
+        monkeypatch.setattr(
+            services,
+            "build_transform_consumer",
+            lambda *_a, **_k: built.append("transform") or Stub(),
+        )
+        monkeypatch.setattr(
+            services,
+            "build_load_consumer",
+            lambda *_a, **_k: built.append("load") or Stub(),
+        )
+
+        assert main([command]) == 0
+        assert built == [expected]
+
+    def test_the_barrier_command_emits_a_run_boundary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _configure(monkeypatch, tmp_path)
+        seen: dict[str, Any] = {}
+
+        monkeypatch.setattr(
+            services,
+            "emit_run_boundary",
+            lambda _settings, run_id, **_k: (seen.setdefault("run_id", run_id) and 3) or 3,
+        )
+
+        run_id = "0a8f4c1e-1111-4222-8333-444455556666"
+        assert main(["emit-run-boundary", "--run-id", run_id]) == 0
+        assert str(seen["run_id"]) == run_id
+
+    def test_the_barrier_requires_a_run_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Emitting a boundary for an unnamed run would close nothing.
+        _configure(monkeypatch, tmp_path)
+
+        with pytest.raises(SystemExit):
+            main(["emit-run-boundary"])
