@@ -7,7 +7,11 @@ identity reproducible across runs and processes.
 
 from __future__ import annotations
 
-from pipeline.transform.canonicalise import canonicalise, merge_candidates
+from pipeline.transform.canonicalise import (
+    canonicalise,
+    merge_candidates,
+    unify_identity,
+)
 from pipeline.transform.identity import (
     content_hash,
     fallback_identity_key,
@@ -42,4 +46,5 @@ __all__ = [
     "select_canonical_isbn",
     "select_language",
     "to_isbn13",
+    "unify_identity",
 ]

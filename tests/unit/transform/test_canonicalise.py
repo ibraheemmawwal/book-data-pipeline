@@ -15,7 +15,11 @@ import pytest
 
 from pipeline.extract.base import Rejected
 from pipeline.models.domain import CleanBook, RawAuthor, RawBook, SourceName
-from pipeline.transform.canonicalise import canonicalise, merge_candidates
+from pipeline.transform.canonicalise import (
+    canonicalise,
+    merge_candidates,
+    unify_identity,
+)
 from pipeline.transform.isbn import isbn13_check_digit
 
 
@@ -336,3 +340,72 @@ class TestIdentityAgreementGuard:
 
         assert isinstance(result, CleanBook)
         assert [a.name for a in result.authors] == ["Melville, Herman"]
+
+
+class TestUnifyIdentity:
+    """Several observations of one candidate become one book.
+
+    The resolver knows a Goodreads record and an Open Library record describe
+    the same candidate; the load layer only sees independent CleanBooks and
+    merges by identity. Without this, 50 candidates produced 92 books in a live
+    run — every book two sources resolved existed twice.
+    """
+
+    def test_an_isbn_observation_pulls_the_others_onto_its_identity(self) -> None:
+        with_isbn = clean(SourceName.OPENLIBRARY, isbns=[SHARED_ISBN])
+        without = clean(SourceName.GOODREADS, source_id="gr1")
+
+        unified = unify_identity([with_isbn, without])
+
+        assert {c.identity_key for c in unified} == {"isbn:" + SHARED_ISBN}
+
+    def test_the_isbn_moves_with_the_identity(self) -> None:
+        # CleanBook requires the two to agree; leaving isbn13 behind would fail
+        # validation the moment the record was rebuilt.
+        unified = unify_identity(
+            [
+                clean(SourceName.OPENLIBRARY, isbns=[SHARED_ISBN]),
+                clean(SourceName.GOODREADS, source_id="gr1"),
+            ]
+        )
+
+        assert all(c.isbn13 == SHARED_ISBN for c in unified)
+
+    def test_each_observation_keeps_its_own_provenance(self) -> None:
+        # One book, but still one book_sources row per source.
+        unified = unify_identity(
+            [
+                clean(SourceName.OPENLIBRARY, isbns=[SHARED_ISBN]),
+                clean(SourceName.GOODREADS, source_id="gr1"),
+            ]
+        )
+
+        assert {c.source for c in unified} == {
+            SourceName.OPENLIBRARY,
+            SourceName.GOODREADS,
+        }
+
+    def test_without_an_isbn_the_most_complete_record_sets_the_identity(self) -> None:
+        rich = clean(SourceName.GOODREADS, source_id="gr1", description="x", publisher="y")
+        sparse = clean(SourceName.GUTENDEX, source_id="1")
+
+        unified = unify_identity([rich, sparse])
+
+        assert len({c.identity_key for c in unified}) == 1
+
+    def test_conflicting_isbns_are_refused(self) -> None:
+        # Two different books behind one candidate. Fusing them would create a
+        # row nothing could separate again.
+        a = clean(SourceName.OPENLIBRARY, isbns=[SHARED_ISBN])
+        b = clean(SourceName.GOODREADS, source_id="gr1", isbns=["9780441172719"])
+
+        with pytest.raises(ValueError, match="disagree on ISBN"):
+            unify_identity([a, b])
+
+    def test_a_single_observation_is_returned_unchanged(self) -> None:
+        only = clean(SourceName.GOODREADS, source_id="gr1")
+
+        assert unify_identity([only])[0].identity_key == only.identity_key
+
+    def test_an_empty_list_is_empty(self) -> None:
+        assert unify_identity([]) == []

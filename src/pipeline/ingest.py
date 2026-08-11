@@ -29,7 +29,7 @@ from pipeline.extract.resolver import CatalogueResolver, Resolution
 from pipeline.load import CatalogueLoader, record_attempts, record_rejection
 from pipeline.models.domain import CandidateBook, CleanBook, SourceName
 from pipeline.observability.runs import finalise_run, record_source_skip, start_run
-from pipeline.transform import canonicalise
+from pipeline.transform import canonicalise, unify_identity
 
 logger = structlog.get_logger(__name__)
 
@@ -131,14 +131,26 @@ def account_for(
             record_rejection(connection, run_id, rejection, stage="extract")
             report.rejected += 1
 
+        for_candidate: list[CleanBook] = []
         for observation in resolution.observations:
             report.observations += 1
             result = canonicalise(observation)
             if isinstance(result, CleanBook):
-                clean.append(result)
+                for_candidate.append(result)
             else:
                 record_rejection(connection, run_id, result, stage="transform")
                 report.rejected += 1
+
+        # The resolver knows these describe one candidate; the load layer only
+        # sees independent records and merges by identity. Without this, a book
+        # two sources both resolved becomes two canonical rows.
+        try:
+            clean.extend(unify_identity(for_candidate))
+        except ValueError:
+            # Genuinely different books behind one candidate. Load them apart
+            # rather than fusing a pair nothing could separate again.
+            logger.warning("ingest.identity_conflict", candidate=resolution.candidate.candidate_key)
+            clean.extend(for_candidate)
 
     return clean
 

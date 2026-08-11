@@ -33,7 +33,28 @@ AUTHOR_WEIGHT = 0.4
 
 EXACT_SCORE = 1.0
 _TITLE_AUTHOR_PARTS = 2
-CONTAINMENT_SCORE = 0.9
+
+# A floor the title must clear on its own. The author confirms a match, it does
+# not substitute for one: without this, a correct author would carry a wrong
+# title over the line, which is exactly how "Social Psychology" resolved to the
+# Study Guide edition in a live run and rewrote the canonical title.
+MIN_TITLE_SIMILARITY = 0.75
+
+# A much looser floor for ISBN lookups. An ISBN is an exact identifier, so
+# Goodreads' own answer is better evidence than string similarity against a
+# title we may have wrong — that is why ISBN queries skip ranking. But the two
+# providers can simply disagree about which book an ISBN denotes, and when the
+# answer shares almost nothing with what was asked for, one of them is wrong
+# and guessing which is worse than falling back to a documented source.
+ISBN_SANITY_FLOOR = 0.3
+
+# Words shared with the query but absent from it are the signal that matters.
+# Measured against real cases, this separates wanted matches (>= 0.80) from
+# unwanted ones (<= 0.73) where character similarity could not: "Dune" scores
+# 0.90 against "Dune Messiah" on edit distance and 0.67 on tokens.
+_NO_SHARED_TOKEN_DISCOUNT = 0.5
+
+_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
 
 _BY_SEPARATOR = re.compile(r"\s+by\s+", re.IGNORECASE)
 _WHITESPACE = re.compile(r"[ \t]+")
@@ -94,16 +115,43 @@ def split_title_by_author(query: str) -> tuple[str, str | None]:
     return " by ".join(parts[:-1]).strip(), parts[-1].strip()
 
 
+def _tokens(value: str) -> set[str]:
+    return {token for token in _TOKEN_SPLIT.split(value.casefold()) if token}
+
+
 def _similarity(left: str, right: str) -> float:
-    """Exact, then containment, then normalised Levenshtein."""
-    a, b = left.strip().casefold(), right.strip().casefold()
+    """How much two titles say the same thing, by words rather than characters.
+
+    Character edit distance cannot tell "Dune" from "Dune Messiah" — one
+    contains the other, so every containment rule scores it near perfect. Word
+    overlap can: the F1 of how much of the query the candidate covers against
+    how much of the candidate the query accounts for. Extra words in the
+    candidate are what a wrong edition or a study guide looks like, and they
+    cost precision.
+
+    Word order stops mattering, which is a bonus: "Hobbit, The" and "The
+    Hobbit" are the same book and scored 0.57 on edit distance.
+    """
+    a, b = left.strip(), right.strip()
     if not a or not b:
         return 0.0
-    if a == b:
+
+    query_tokens, candidate_tokens = _tokens(a), _tokens(b)
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    if query_tokens == candidate_tokens:
         return EXACT_SCORE
-    if a in b or b in a:
-        return CONTAINMENT_SCORE
-    return fuzz.ratio(a, b) / 100.0
+
+    shared = query_tokens & candidate_tokens
+    if not shared:
+        # Nothing in common at word level. Keep a discounted character score so
+        # a spelling difference is not treated as a different book, but never
+        # let it reach the threshold on its own.
+        return fuzz.ratio(a.casefold(), b.casefold()) / 100.0 * _NO_SHARED_TOKEN_DISCOUNT
+
+    recall = len(shared) / len(query_tokens)
+    precision = len(shared) / len(candidate_tokens)
+    return 2 * recall * precision / (recall + precision)
 
 
 def score_candidate(
@@ -122,11 +170,30 @@ def score_candidate(
         return 0.0
 
     title_score = _similarity(query_title, candidate_title)
+    if title_score < MIN_TITLE_SIMILARITY:
+        # The author cannot rescue a wrong title. A study guide by the right
+        # author is still not the book that was asked for.
+        return 0.0
+
     if not query_author or not candidate_author:
         return title_score
 
     author_score = _similarity(query_author, candidate_author)
     return TITLE_WEIGHT * title_score + AUTHOR_WEIGHT * author_score
+
+
+def is_plausible_isbn_match(query_title: str, candidate_title: str) -> bool:
+    """Whether an ISBN lookup returned something recognisably the same book.
+
+    Deliberately not the ranking threshold. This rejects a gross mismatch — a
+    completely different book behind the same number — and nothing subtler. It
+    will not catch a provider that maps an ISBN to a companion volume with a
+    similar title, because that is indistinguishable from a provider that
+    simply holds a fuller subtitle than we do.
+    """
+    if not query_title.strip() or not candidate_title.strip():
+        return True
+    return _similarity(query_title, candidate_title) >= ISBN_SANITY_FLOOR
 
 
 def parse_series_from_title(dirty_title: str | None) -> ParsedSeries | None:

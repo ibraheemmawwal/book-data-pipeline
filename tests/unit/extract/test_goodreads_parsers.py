@@ -54,10 +54,11 @@ class TestScoreCandidate:
     def test_matching_is_case_insensitive(self) -> None:
         assert score_candidate("dune", None, "Dune", "Frank Herbert") == 1.0
 
-    def test_substring_containment_scores_point_nine(self) -> None:
+    def test_a_missing_leading_article_still_matches(self) -> None:
+        # Three of four words shared; the candidate has one the query lacks.
         score = score_candidate("Game of Thrones", None, "A Game of Thrones", "Martin")
 
-        assert score == pytest.approx(0.9)
+        assert score == pytest.approx(0.857, abs=0.01)
 
     def test_title_and_author_are_weighted_sixty_forty(self) -> None:
         # Exact title, exact author.
@@ -338,3 +339,74 @@ class TestParseFirstEdition:
         html = '<div data-testid="editionCell">ISBN 9780553381680</div>'
 
         assert parse_first_edition(html).isbn13 is None
+
+
+class TestTitleMatching:
+    """Scoring by words rather than characters.
+
+    Edit distance cannot tell a book from its study guide: one title contains
+    the other, so every containment rule scores it near perfect. That is how
+    "Social Psychology" resolved to "Social Psychology: Study Guide" in a live
+    run, and — because Goodreads wins title preference — rewrote the canonical
+    title of a real book.
+    """
+
+    @pytest.mark.parametrize(
+        ("query", "candidate"),
+        [
+            ("Social Psychology", "Social Psychology: Study Guide"),
+            ("Dune", "Dune Messiah"),
+            ("Dune", "Children of Dune"),
+            ("A Game of Thrones", "A Game of Thrones: The Graphic Novel"),
+        ],
+    )
+    def test_a_candidate_with_extra_words_is_refused(self, query: str, candidate: str) -> None:
+        # Extra words in the candidate are what a different edition, a
+        # companion volume or a sequel look like.
+        assert score_candidate(query, None, candidate, None) < 0.4
+
+    @pytest.mark.parametrize(
+        ("query", "candidate"),
+        [
+            ("Social Psychology", "Social Psychology"),
+            ("Game of Thrones", "A Game of Thrones"),
+            ("Herbs and Spices", "Herbs & Spices"),
+            ("The Hobbit", "Hobbit, The"),
+        ],
+    )
+    def test_the_same_book_written_differently_still_matches(
+        self, query: str, candidate: str
+    ) -> None:
+        assert score_candidate(query, None, candidate, None) >= 0.75
+
+    def test_word_order_does_not_matter(self) -> None:
+        # "Hobbit, The" scored 0.57 on edit distance and is the same book.
+        assert score_candidate("The Hobbit", None, "Hobbit, The", None) == 1.0
+
+    def test_punctuation_and_case_are_ignored(self) -> None:
+        assert score_candidate("herbs & spices!", None, "Herbs and Spices", None) > 0
+
+    def test_unrelated_titles_of_similar_length_score_near_zero(self) -> None:
+        # The original failure mode: normalised Levenshtein put these at 0.41,
+        # just over a 0.4 threshold.
+        assert score_candidate("Quantum Chromodynamics", None, "A Game of Thrones", None) < 0.4
+
+
+class TestAuthorCannotRescueATitle:
+    def test_a_right_author_does_not_carry_a_wrong_title(self) -> None:
+        # The exact live failure: same author, wrong book.
+        assert (
+            score_candidate("Social Psychology", "Baron", "Social Psychology: Study Guide", "Baron")
+            == 0.0
+        )
+
+    def test_a_matching_author_still_improves_a_good_title(self) -> None:
+        with_author = score_candidate("Dune", "Frank Herbert", "Dune", "Frank Herbert")
+        wrong_author = score_candidate("Dune", "Someone Else", "Dune", "Frank Herbert")
+
+        assert with_author > wrong_author
+
+    def test_a_wrong_author_alone_does_not_reject_a_matching_title(self) -> None:
+        # Providers spell names differently; a title match is the stronger
+        # signal and should survive an author we cannot confirm.
+        assert score_candidate("Dune", "F. Herbert", "Dune", "Frank Herbert") >= 0.4
