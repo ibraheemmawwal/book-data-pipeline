@@ -1,0 +1,95 @@
+{
+  "count": 79140,
+  "next": null,
+  "previous": "https://gutendex.com/books/?page=1",
+  "results": [
+    {
+      "id": 72,
+      "title": "Thuvia, maid of Mars",
+      "authors": [
+        {
+          "name": "Burroughs, Edgar Rice",
+          "birth_year": 1875,
+          "death_year": 1950
+        }
+      ],
+      "summaries": [
+        "\"Thuvia, Maid of Mars\" by Edgar Rice Burroughs is a science fantasy novel published in 1916. The fourth book in the Barsoom series shifts focus to Carthoris, son of John Carter, who loves Princess Thuvia of Ptarth—a woman promised to another. When Thuvia is kidnapped and Carthoris is framed, war threatens to erupt between Martian nations. His desperate rescue mission leads him to ancient Lothar, where a mysterious race creates deadly illusions from pure thought. (This is an automatically generated summary.)"
+      ],
+      "editors": [],
+      "translators": [],
+      "subjects": [
+        "Mars (Planet) -- Fiction",
+        "Martians -- Fiction",
+        "Science fiction"
+      ],
+      "bookshelves": [
+        "Category: Adventure",
+        "Category: American Literature",
+        "Category: Romance",
+        "Category: Science-Fiction & Fantasy",
+        "Science Fiction"
+      ],
+      "languages": [
+        "en"
+      ],
+      "copyright": false,
+      "media_type": "Text",
+      "formats": {
+        "text/html": "https://www.gutenberg.org/ebooks/72.html.images",
+        "application/epub+zip": "https://www.gutenberg.org/ebooks/72.epub3.images",
+        "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/72.kf8.images",
+        "application/rdf+xml": "https://www.gutenberg.org/ebooks/72.rdf",
+        "image/jpeg": "https://www.gutenberg.org/cache/epub/72/pg72.cover.medium.jpg",
+        "application/octet-stream": "https://www.gutenberg.org/files/72/72-0.zip",
+        "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/72.txt.utf-8",
+        "text/plain; charset=us-ascii": "https://www.gutenberg.org/files/72/72-0.txt"
+      },
+      "download_count": 81388
+    },
+    {
+      "id": 468,
+      "title": "Manon Lescaut",
+      "authors": [
+        {
+          "name": "Prévost, abbé",
+          "birth_year": 1697,
+          "death_year": 1763
+        }
+      ],
+      "summaries": [
+        "\"Manon Lescaut\" by Abbé Prévost is a novel first published in 1731. It tells the tragic love story of a young nobleman and a common woman who choose to live together unmarried, beginning a moral descent into gambling, fraud, and crime. Their passionate relationship leads them from Paris to imprisonment and ultimately to deportation in New Orleans. Narrated retrospectively by the Chevalier des Grieux, this confessional tale shocked eighteenth-century readers with its realistic depiction of society's underbelly and became one of French literature's most reprinted classics. (This is an automatically generated summary.)"
+      ],
+      "editors": [],
+      "translators": [],
+      "subjects": [
+        "Adventure stories",
+        "Lescaut, Manon, 1689-1721 -- Fiction",
+        "Man-woman relationships -- Fiction"
+      ],
+      "bookshelves": [
+        "Category: Classics of Literature",
+        "Category: French Literature",
+        "Category: Novels",
+        "Category: Romance"
+      ],
+      "languages": [
+        "en"
+      ],
+      "copyright": false,
+      "media_type": "Text",
+      "formats": {
+        "text/html": "https://www.gutenberg.org/ebooks/468.html.images",
+        "text/html; charset=iso-8859-1": "https://www.gutenberg.org/files/468/468-h/468-h.htm",
+        "application/epub+zip": "https://www.gutenberg.org/ebooks/468.epub3.images",
+        "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/468.kf8.images",
+        "text/plain; charset=iso-8859-1": "https://www.gutenberg.org/files/468/468-8.txt",
+        "application/rdf+xml": "https://www.gutenberg.org/ebooks/468.rdf",
+        "image/jpeg": "https://www.gutenberg.org/cache/epub/468/pg468.cover.medium.jpg",
+        "application/octet-stream": "https://www.gutenberg.org/cache/epub/468/pg468-h.zip",
+        "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/468.txt.utf-8"
+      },
+      "download_count": 80853
+    }
+  ]
+}

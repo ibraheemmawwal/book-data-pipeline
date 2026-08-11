@@ -1,0 +1,149 @@
+{
+  "count": 79140,
+  "next": "https://gutendex.com/books/?page=2",
+  "previous": null,
+  "results": [
+    {
+      "id": 2701,
+      "title": "Moby Dick; Or, The Whale",
+      "authors": [
+        {
+          "name": "Melville, Herman",
+          "birth_year": 1819,
+          "death_year": 1891
+        }
+      ],
+      "summaries": [
+        "\"Moby Dick; Or, The Whale\" by Herman Melville is an epic novel published in 1851. Sailor Ishmael narrates the obsessive quest of Captain Ahab, who commands the whaling ship Pequod in pursuit of Moby Dick, a giant white sperm whale that destroyed his leg. Ahab's monomaniacal hunt for vengeance drives the ship and its diverse crew across the world's oceans, blending realistic whaling details with profound explorations of good, evil, fate, and human nature in this cornerstone of American literature. (This is an automatically generated summary.)"
+      ],
+      "editors": [],
+      "translators": [],
+      "subjects": [
+        "Adventure stories",
+        "Ahab, Captain (Fictitious character) -- Fiction",
+        "Mentally ill -- Fiction",
+        "Psychological fiction",
+        "Sea stories",
+        "Ship captains -- Fiction",
+        "Whales -- Fiction",
+        "Whaling -- Fiction",
+        "Whaling ships -- Fiction"
+      ],
+      "bookshelves": [
+        "Best Books Ever Listings",
+        "Category: Adventure",
+        "Category: American Literature",
+        "Category: Classics of Literature",
+        "Category: Novels"
+      ],
+      "languages": [
+        "en"
+      ],
+      "copyright": false,
+      "media_type": "Text",
+      "formats": {
+        "text/html": "https://www.gutenberg.org/ebooks/2701.html.images",
+        "application/epub+zip": "https://www.gutenberg.org/ebooks/2701.epub3.images",
+        "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/2701.kf8.images",
+        "application/rdf+xml": "https://www.gutenberg.org/ebooks/2701.rdf",
+        "image/jpeg": "https://www.gutenberg.org/cache/epub/2701/pg2701.cover.medium.jpg",
+        "application/octet-stream": "https://www.gutenberg.org/cache/epub/2701/pg2701-h.zip",
+        "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/2701.txt.utf-8"
+      },
+      "download_count": 188210
+    },
+    {
+      "id": 1342,
+      "title": "Pride and Prejudice",
+      "authors": [
+        {
+          "name": "Austen, Jane",
+          "birth_year": 1775,
+          "death_year": 1817
+        }
+      ],
+      "summaries": [
+        "\"Pride and Prejudice\" by Jane Austen is a novel published in 1813. It follows Elizabeth Bennet, who must learn to see past first impressions and hasty judgments. With five daughters and an estate that can only pass to male heirs, the Bennet family faces financial pressure to marry well. When wealthy Mr. Darcy arrives in their countryside neighborhood, his pride and Elizabeth's prejudice set the stage for misunderstandings, hidden truths, and unexpected revelations about character and love. (This is an automatically generated summary.)"
+      ],
+      "editors": [],
+      "translators": [],
+      "subjects": [
+        "Courtship -- Fiction",
+        "Domestic fiction",
+        "England -- Fiction",
+        "Love stories",
+        "Sisters -- Fiction",
+        "Social classes -- Fiction",
+        "Young women -- Fiction"
+      ],
+      "bookshelves": [
+        "Best Books Ever Listings",
+        "Category: British Literature",
+        "Category: Classics of Literature",
+        "Category: Novels",
+        "Category: Romance",
+        "Harvard Classics"
+      ],
+      "languages": [
+        "en"
+      ],
+      "copyright": false,
+      "media_type": "Text",
+      "formats": {
+        "text/html": "https://www.gutenberg.org/ebooks/1342.html.images",
+        "application/epub+zip": "https://www.gutenberg.org/ebooks/1342.epub3.images",
+        "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/1342.kf8.images",
+        "application/rdf+xml": "https://www.gutenberg.org/ebooks/1342.rdf",
+        "image/jpeg": "https://www.gutenberg.org/cache/epub/1342/pg1342.cover.medium.jpg",
+        "application/octet-stream": "https://www.gutenberg.org/cache/epub/1342/pg1342-h.zip",
+        "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/1342.txt.utf-8"
+      },
+      "download_count": 183505
+    },
+    {
+      "id": 2641,
+      "title": "A Room with a View",
+      "authors": [
+        {
+          "name": "Forster, E. M. (Edward Morgan)",
+          "birth_year": 1879,
+          "death_year": 1970
+        }
+      ],
+      "summaries": [
+        "\"A Room with a View\" by E. M. Forster is a novel published in 1908. Young Lucy Honeychurch travels to Italy with her uptight cousin as chaperone, where an unexpected encounter with the unconventional George Emerson stirs confusing emotions. Back in England, Lucy becomes engaged to the sophisticated but pompous Cecil Vyse. When the Emersons move nearby, Lucy must confront her true feelings and decide between societal expectations and genuine passion in Edwardian England's restrained culture. (This is an automatically generated summary.)"
+      ],
+      "editors": [],
+      "translators": [],
+      "subjects": [
+        "British -- Italy -- Fiction",
+        "England -- Fiction",
+        "Florence (Italy) -- Fiction",
+        "Humorous stories",
+        "Young women -- Fiction"
+      ],
+      "bookshelves": [
+        "Category: British Literature",
+        "Category: Novels",
+        "Category: Romance",
+        "Italy"
+      ],
+      "languages": [
+        "en"
+      ],
+      "copyright": false,
+      "media_type": "Text",
+      "formats": {
+        "text/html": "https://www.gutenberg.org/ebooks/2641.html.images",
+        "application/epub+zip": "https://www.gutenberg.org/ebooks/2641.epub3.images",
+        "application/x-mobipocket-ebook": "https://www.gutenberg.org/ebooks/2641.kf8.images",
+        "application/rdf+xml": "https://www.gutenberg.org/ebooks/2641.rdf",
+        "image/jpeg": "https://www.gutenberg.org/cache/epub/2641/pg2641.cover.medium.jpg",
+        "application/octet-stream": "https://www.gutenberg.org/cache/epub/2641/pg2641-h.zip",
+        "text/plain; charset=utf-8": "https://www.gutenberg.org/ebooks/2641.txt.utf-8",
+        "text/plain; charset=us-ascii": "https://www.gutenberg.org/files/2641/2641-0.txt"
+      },
+      "download_count": 142569
+    }
+  ]
+}

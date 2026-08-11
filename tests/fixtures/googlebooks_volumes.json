@@ -1,0 +1,55 @@
+{
+  "kind": "books#volumes",
+  "totalItems": 2,
+  "items": [
+    {
+      "kind": "books#volume",
+      "id": "hVj4CwAAQBAJ",
+      "etag": "8s6VQzZ1sVQ",
+      "selfLink": "https://www.googleapis.com/books/v1/volumes/hVj4CwAAQBAJ",
+      "volumeInfo": {
+        "title": "A Brief History of Time",
+        "subtitle": "From the Big Bang to Black Holes",
+        "authors": ["Stephen Hawking"],
+        "publisher": "Bantam",
+        "publishedDate": "1998-09-01",
+        "description": "A landmark volume in science writing by one of the great minds of our time.",
+        "industryIdentifiers": [
+          { "type": "ISBN_13", "identifier": "9780553380163" },
+          { "type": "ISBN_10", "identifier": "0553380168" }
+        ],
+        "pageCount": 212,
+        "printType": "BOOK",
+        "categories": ["Science", "Cosmology"],
+        "language": "en",
+        "imageLinks": {
+          "smallThumbnail": "http://books.google.com/books/content?id=hVj4CwAAQBAJ&printsec=frontcover&img=1&zoom=5",
+          "thumbnail": "http://books.google.com/books/content?id=hVj4CwAAQBAJ&printsec=frontcover&img=1&zoom=1"
+        },
+        "infoLink": "https://books.google.com/books?id=hVj4CwAAQBAJ"
+      },
+      "saleInfo": { "country": "GB", "saleability": "NOT_FOR_SALE", "isEbook": false },
+      "accessInfo": { "country": "GB", "viewability": "PARTIAL", "embeddable": true }
+    },
+    {
+      "kind": "books#volume",
+      "id": "3PuGDwAAQBAJ",
+      "etag": "pRcMlqLNq0k",
+      "selfLink": "https://www.googleapis.com/books/v1/volumes/3PuGDwAAQBAJ",
+      "volumeInfo": {
+        "title": "Dune",
+        "authors": ["Frank Herbert"],
+        "publisher": "Ace Books",
+        "publishedDate": "1965",
+        "industryIdentifiers": [
+          { "type": "ISBN_10", "identifier": "0441172717" }
+        ],
+        "printType": "BOOK",
+        "language": "en",
+        "infoLink": "https://books.google.com/books?id=3PuGDwAAQBAJ"
+      },
+      "saleInfo": { "country": "GB", "saleability": "NOT_FOR_SALE", "isEbook": false },
+      "accessInfo": { "country": "GB", "viewability": "NO_PAGES", "embeddable": false }
+    }
+  ]
+}
