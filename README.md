@@ -1,5 +1,7 @@
 # book-data-pipeline
 
+[![CI](https://github.com/ibraheemmawwal/book-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/ibraheemmawwal/book-data-pipeline/actions/workflows/ci.yml)
+
 An ETL pipeline that ingests book metadata from documented public APIs, validates and
 normalises source records, preserves source provenance, resolves them into canonical
 books, and loads a PostgreSQL catalogue designed for search and analytics.
@@ -31,9 +33,26 @@ uv sync --all-groups          # create .venv and install everything
 uv run ruff check .           # lint
 uv run ruff format --check .  # formatting
 uv run mypy src/              # strict type checking
-uv run pytest                 # unit tests
-uv run pytest -m "not integration"   # skip container-backed tests
+uv run pytest                 # everything
+uv run pytest -m "not integration"   # fast: no containers
+uv run pytest -m integration         # container-backed, needs Docker
 ```
+
+### Continuous integration
+
+Four jobs run on every push and pull request: `quality` (lint, format, strict
+types), `unit`, `postgres-integration`, and `coverage`.
+
+Coverage is measured per test job and gated once, in a job that combines them.
+Gating on the unit job alone would measure the wrong thing — the load layer is
+exercised almost entirely by container-backed tests, so a unit-only gate is
+satisfied by deleting integration-heavy code and failed by writing it. Unit
+tests alone score 90%; combined, the suite is at 98%, which is where the gate
+sits.
+
+Three further jobs from the TRD (`kafka-integration`, `dag`, `image`) arrive
+with the releases that give them something to run. A green job that asserts
+nothing is worse than an absent one.
 
 Copy `.env.example` to `.env` for local runs, then pass it explicitly:
 

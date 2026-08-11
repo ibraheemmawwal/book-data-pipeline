@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded push should not keep burning runners, but never cancel a run on
+# main: that is the one whose result the badge reports.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # Settings reads the environment directly and rejects unknown PIPELINE_*
+  # variables, so these are the real values the suite runs against.
+  PIPELINE_DATABASE_URL: postgresql+psycopg://ci:ci@localhost:5432/catalogue
+  PIPELINE_OPENLIBRARY_CONTACT_EMAIL: ci@example.com
+  UV_FROZEN: "1"
+
+jobs:
+  quality:
+    name: Lint, format and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      # src/ only: dags/ is excluded deliberately and covered by the dag job.
+      - run: uv run mypy src/
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --all-groups
+      # Measures but does not gate. One job cannot fairly judge coverage of
+      # code another job exercises; the coverage job decides.
+      - name: Run unit tests
+        run: uv run pytest -m "not integration" --cov=src --cov-report=
+        env:
+          COVERAGE_FILE: .coverage.unit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: .coverage.unit
+          # .coverage.* is a dotfile. Without this it is skipped silently and
+          # surfaces later as a coverage drop with no failing test.
+          include-hidden-files: true
+          retention-days: 1
+
+  postgres-integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --all-groups
+      # testcontainers starts its own PostgreSQL 16, matching the deployment
+      # target. A service container would be a second, differently-configured
+      # database that the tests do not actually use.
+      - name: Run integration tests
+        run: uv run pytest -m integration -p no:randomly --cov=src --cov-report=
+        env:
+          COVERAGE_FILE: .coverage.postgres
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres
+          path: .coverage.postgres
+          include-hidden-files: true
+          retention-days: 1
+
+  coverage:
+    name: Combined coverage gate
+    runs-on: ubuntu-latest
+    needs: [unit, postgres-integration]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --all-groups
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      # Gating on the unit job alone would be satisfied by deleting
+      # integration-heavy modules and failed by writing them.
+      - name: Combine and enforce the gate
+        run: |
+          uv run coverage combine
+          uv run coverage report --show-missing
+          uv run coverage xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+# Three jobs from TRD section 14 are not here yet because they would have
+# nothing to run. A green job that asserts nothing is worse than an absent one.
+# They arrive with the milestone that gives them content:
+#
+#   kafka-integration  -> v2.0, with the first `-m integration` Kafka tests
+#   dag                -> v1.0, with dags/book_ingestion_dag.py and DagBag tests
+#   image              -> v1.0, with docker/pipeline.Dockerfile
+#
+# When kafka-integration lands it must upload .coverage.kafka and be added to
+# this workflow's `coverage.needs`, or the gate will silently measure less than
+# it claims.
