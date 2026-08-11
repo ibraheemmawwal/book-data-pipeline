@@ -39,6 +39,7 @@ from pipeline.models.db import (
     book_subjects,
     books,
     rejected_records,
+    resolution_attempts,
     series,
     series_sources,
     subjects,
@@ -634,3 +635,40 @@ def record_rejection(
             detail=rejection.detail,
         )
     )
+
+
+def record_attempts(connection: Connection, run_id: UUID, attempts: Iterable[Any]) -> int:
+    """Persist one run's resolution attempts.
+
+    Idempotent on ``(run_id, candidate_key, source, attempt_no)`` so an Airflow
+    retry that re-resolves the same candidates updates its own rows rather than
+    failing the task on a primary-key clash — the attempt record should never
+    be the thing that breaks a rerun.
+    """
+    rows = [
+        {
+            "run_id": run_id,
+            "candidate_key": attempt.candidate_key,
+            "source": attempt.source.value,
+            "attempt_no": attempt.attempt_no,
+            "outcome": attempt.outcome.value,
+            "fallback_reason": attempt.fallback_reason,
+            "duration_ms": attempt.duration_ms,
+        }
+        for attempt in attempts
+    ]
+    if not rows:
+        return 0
+
+    statement = insert(resolution_attempts).values(rows)
+    connection.execute(
+        statement.on_conflict_do_update(
+            index_elements=["run_id", "candidate_key", "source", "attempt_no"],
+            set_={
+                "outcome": statement.excluded.outcome,
+                "fallback_reason": statement.excluded.fallback_reason,
+                "duration_ms": statement.excluded.duration_ms,
+            },
+        )
+    )
+    return len(rows)

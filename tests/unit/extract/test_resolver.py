@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from pydantic import SecretStr
 
 from pipeline.config import Settings
 from pipeline.extract.goodreads import GoodreadsExtractor
@@ -22,6 +23,20 @@ from pipeline.models.domain import CandidateBook, SourceName
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
 AUTOCOMPLETE = "https://www.goodreads.com/book/auto_complete"
+OL_SEARCH = "https://openlibrary.org/search.json"
+GB_VOLUMES = "https://www.googleapis.com/books/v1/volumes"
+GUTENDEX = "https://gutendex.com/books"
+
+
+def mock_live_fallbacks_empty() -> None:
+    """Make every documented fallback answer with nothing.
+
+    Explicit rather than implicit: an unmocked call raises, which is how these
+    tests notice when a change starts reaching for a source it should not.
+    """
+    respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+    respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+    respx.get(GUTENDEX).mock(return_value=httpx.Response(200, json={"next": None, "results": []}))
 
 
 def autocomplete_payload() -> Any:
@@ -101,6 +116,7 @@ class TestGoodreadsFirst:
     ) -> None:
         # The source answered and had nothing — distinct from never answering.
         respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=[]))
+        mock_live_fallbacks_empty()
 
         result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(candidate())
 
@@ -112,6 +128,7 @@ class TestGoodreadsFirst:
         self, accepted: Settings, goodreads: GoodreadsExtractor
     ) -> None:
         respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(403))
+        mock_live_fallbacks_empty()
 
         result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(candidate())
 
@@ -123,6 +140,7 @@ class TestGoodreadsFirst:
     ) -> None:
         # One upstream outage must not become thousands of failing calls.
         route = respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(403))
+        mock_live_fallbacks_empty()
         resolver = CatalogueResolver(accepted, goodreads=goodreads)
 
         await resolver.resolve(candidate(candidate_key="a"))
@@ -137,6 +155,7 @@ class TestGoodreadsFirst:
 class TestGates:
     async def test_an_unaccepted_source_is_skipped_with_a_reason(self, settings: Settings) -> None:
         # Not an error: a clean clone runs the documented path without it.
+        mock_live_fallbacks_empty()
         resolver = CatalogueResolver(settings, goodreads=GoodreadsExtractor(settings))
 
         result = await resolver.resolve(candidate())
@@ -146,6 +165,7 @@ class TestGates:
         assert "disabled" in (attempt.fallback_reason or "")
 
     async def test_no_adapter_configured_is_skipped(self, settings: Settings) -> None:
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(candidate())
 
         assert outcome_for(result.attempts, SourceName.GOODREADS) is Outcome.SKIPPED
@@ -154,6 +174,7 @@ class TestGates:
 class TestRetainedDiscovery:
     async def test_the_discovery_payload_becomes_an_observation(self, settings: Settings) -> None:
         # Free: it cost a dump read, not a request.
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(
             candidate(discovery_payload={"key": "/works/OL1W", "title": "A Game of Thrones"})
         )
@@ -185,6 +206,7 @@ class TestRetainedDiscovery:
         self, settings: Settings
     ) -> None:
         # Discovery proves a book exists, not that its fields are usable.
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(
             candidate(discovery_payload={"no_key": True})
         )
@@ -193,6 +215,7 @@ class TestRetainedDiscovery:
         assert result.rejections
 
     async def test_no_payload_is_recorded_as_skipped(self, settings: Settings) -> None:
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(candidate())
 
         attempt = next(a for a in result.attempts if a.source is SourceName.OPENLIBRARY)
@@ -201,6 +224,7 @@ class TestRetainedDiscovery:
 
 class TestObservability:
     async def test_every_source_attempt_is_recorded(self, settings: Settings) -> None:
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(candidate())
 
         assert {a.source for a in result.attempts} >= {
@@ -209,11 +233,13 @@ class TestObservability:
         }
 
     async def test_attempts_carry_the_candidate_key(self, settings: Settings) -> None:
+        mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(candidate(candidate_key="/works/OL9W"))
 
         assert all(a.candidate_key == "/works/OL9W" for a in result.attempts)
 
     async def test_duration_is_measured_from_an_injectable_clock(self, settings: Settings) -> None:
+        mock_live_fallbacks_empty()
         ticks = iter([0.0, 0.25, 1.0, 1.0, 1.0])
         resolver = CatalogueResolver(settings, clock=lambda: next(ticks))
 
@@ -232,3 +258,150 @@ class TestObservability:
             SourceName.GOOGLEBOOKS,
             SourceName.GUTENDEX,
         }
+
+
+class TestDocumentedFallbacks:
+    """Open Library, Google Books and Gutendex, under budget."""
+
+    @respx.mock
+    async def test_google_books_answers_when_nothing_else_did(self, settings: Settings) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GB_VOLUMES).mock(
+            return_value=httpx.Response(
+                200,
+                json={"items": [{"id": "gb1", "volumeInfo": {"title": "A Game of Thrones"}}]},
+            )
+        )
+        configured = settings.model_copy(update={"googlebooks_api_key": SecretStr("k")})
+
+        result = await CatalogueResolver(configured).resolve(candidate())
+
+        assert result.observations[0].source is SourceName.GOOGLEBOOKS
+        assert outcome_for(result.attempts, SourceName.GOOGLEBOOKS) is Outcome.RESOLVED
+
+    @respx.mock
+    async def test_gutendex_is_only_reached_when_all_else_fails(self, settings: Settings) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        gutendex = respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(
+                200,
+                json={"next": None, "results": [{"id": 1, "title": "A Game of Thrones"}]},
+            )
+        )
+        configured = settings.model_copy(update={"googlebooks_api_key": SecretStr("k")})
+
+        result = await CatalogueResolver(configured).resolve(candidate())
+
+        assert gutendex.called
+        assert result.observations[0].source is SourceName.GUTENDEX
+
+    @respx.mock
+    async def test_gutendex_is_skipped_when_something_already_resolved(
+        self, settings: Settings
+    ) -> None:
+        # A last resort that runs anyway is not a last resort.
+        gutendex = respx.get(GUTENDEX).mock(return_value=httpx.Response(200, json={}))
+
+        await CatalogueResolver(settings).resolve(
+            candidate(discovery_payload={"key": "/works/OL1W", "title": "T"})
+        )
+
+        assert not gutendex.called
+
+    @respx.mock
+    async def test_live_fallbacks_are_skipped_when_goodreads_resolved(
+        self, accepted: Settings, goodreads: GoodreadsExtractor
+    ) -> None:
+        # Filling gaps is not the same as re-answering an answered question;
+        # spending budget here would starve the candidates that need it.
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=autocomplete_payload()))
+        respx.get(url__regex=r".*/book/show/.*").mock(return_value=httpx.Response(404))
+        respx.get(url__regex=r".*/work/editions/.*").mock(return_value=httpx.Response(404))
+        gb = respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={}))
+
+        result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(candidate())
+
+        assert result.resolved
+        assert not gb.called
+
+
+class TestBudgetEnforcement:
+    @respx.mock
+    async def test_an_exhausted_budget_records_a_skip(self, settings: Settings) -> None:
+        # Budget exhaustion is observable, not permission to keep going.
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        capped = settings.model_copy(
+            update={
+                "openlibrary_max_fallback_queries_per_run": 1,
+                "googlebooks_api_key": SecretStr("k"),
+            }
+        )
+        resolver = CatalogueResolver(capped)
+
+        await resolver.resolve(candidate(candidate_key="a"))
+        second = await resolver.resolve(candidate(candidate_key="b"))
+
+        attempt = next(
+            a for a in second.attempts if a.source is SourceName.OPENLIBRARY and a.attempt_no == 2
+        )
+        assert attempt.outcome is Outcome.SKIPPED
+        assert "budget" in (attempt.fallback_reason or "")
+
+    @respx.mock
+    async def test_the_budget_stops_further_requests(self, settings: Settings) -> None:
+        route = respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        capped = settings.model_copy(update={"openlibrary_max_fallback_queries_per_run": 1})
+        resolver = CatalogueResolver(capped)
+
+        for key in ("a", "b", "c"):
+            await resolver.resolve(candidate(candidate_key=key))
+
+        assert route.call_count == 1
+
+    @respx.mock
+    async def test_a_missing_api_key_is_a_skip_not_an_outage(self, settings: Settings) -> None:
+        # Our configuration gap, not the provider's. Recording it as
+        # unavailable would send someone hunting a fault at Google.
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+
+        keyless = settings.model_copy(update={"googlebooks_api_key": None})
+
+        result = await CatalogueResolver(keyless).resolve(candidate())
+
+        attempt = next(a for a in result.attempts if a.source is SourceName.GOOGLEBOOKS)
+        assert attempt.outcome is Outcome.SKIPPED
+        assert "api key" in (attempt.fallback_reason or "").lower()
+
+    @respx.mock
+    async def test_an_unavailable_fallback_is_recorded_and_not_fatal(
+        self, settings: Settings
+    ) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(503))
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        configured = settings.model_copy(
+            update={"googlebooks_api_key": SecretStr("k"), "http_max_attempts": 1}
+        )
+
+        result = await CatalogueResolver(configured).resolve(candidate())
+
+        # attempt_no 2 is the live lookup; 1 is the retained-discovery leg.
+        live = next(
+            a for a in result.attempts if a.source is SourceName.OPENLIBRARY and a.attempt_no == 2
+        )
+        assert live.outcome is Outcome.UNAVAILABLE
+        assert not result.resolved

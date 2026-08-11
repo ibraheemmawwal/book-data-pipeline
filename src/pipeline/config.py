@@ -35,6 +35,7 @@ REPOSITORY_URL = "https://github.com/ibraheemmawwal/book-data-pipeline"
 # The load stage commits one transaction per batch; the TRD caps that at 1,000
 # records so a failure never rolls back an unbounded amount of work.
 MAX_LOAD_BATCH_SIZE = 1000
+SHA256_HEX_LENGTH = 64
 
 # Politeness cap for Open Library. Deliberately a ceiling, not a default.
 MAX_OPENLIBRARY_REQUESTS_PER_SECOND = 1.0
@@ -105,6 +106,16 @@ class Settings(BaseSettings):
     # Budget exhaustion is an observable skip, not permission to bulk-page a
     # source whose guidance points at dumps for volume.
     openlibrary_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
+
+    # --- Candidate discovery ------------------------------------------------
+    # A pinned dump and its digest. Discovery is only reproducible against a
+    # known input, so an unpinned checksum is allowed but is a deliberate
+    # decision to give that up rather than an oversight.
+    openlibrary_dump_path: Path | None = None
+    openlibrary_dump_sha256: str | None = None
+    discovery_manifest_path: Path = Path("./staging/candidates.jsonl")
+    discovery_languages: str = "eng"
+    discovery_max_candidates: Annotated[int, Field(ge=1)] = 20000
 
     # --- Google Books -------------------------------------------------------
     googlebooks_enabled: bool = True
@@ -182,6 +193,22 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    @field_validator("openlibrary_dump_sha256")
+    @classmethod
+    def _check_digest_shape(cls, value: str | None) -> str | None:
+        """A malformed digest can never match, so it fails at startup instead.
+
+        Discovering for an hour and then failing verification is a much worse
+        way to learn that someone pasted a truncated hash.
+        """
+        if value is None:
+            return None
+        digest = value.strip().lower()
+        if len(digest) != SHA256_HEX_LENGTH or not all(c in "0123456789abcdef" for c in digest):
+            msg = "openlibrary_dump_sha256 must be 64 hexadecimal characters"
+            raise ValueError(msg)
+        return digest
+
     @field_validator("googlebooks_api_key", mode="before")
     @classmethod
     def _blank_key_is_absent(cls, value: object) -> object:
@@ -239,6 +266,11 @@ class Settings(BaseSettings):
         if self.openlibrary_enabled and self.openlibrary_contact_email:
             identity += f"; {self.openlibrary_contact_email}"
         return identity + ")"
+
+    def discovery_language_set(self) -> frozenset[str] | None:
+        """Languages to keep during discovery, or ``None`` for no filter."""
+        codes = {c.strip().lower() for c in self.discovery_languages.split(",") if c.strip()}
+        return frozenset(codes) or None
 
     def active_sources(self) -> tuple[SourceName, ...]:
         """Sources that will actually run, in extraction order.

@@ -32,12 +32,18 @@ import httpx
 import structlog
 
 from pipeline.config import Settings
-from pipeline.extract.base import Rejected
+from pipeline.extract import build_extractor
+from pipeline.extract.base import (
+    ExtractionRequest,
+    Rejected,
+    SourceUnavailableError,
+)
 from pipeline.extract.goodreads import (
     GoodreadsExtractor,
     GoodreadsNotAcceptedError,
     GoodreadsUnavailableError,
 )
+from pipeline.extract.googlebooks import MissingCredentialError
 from pipeline.extract.openlibrary import map_payload
 from pipeline.models.domain import CandidateBook, RawBook, SourceName
 
@@ -162,7 +168,136 @@ class CatalogueResolver:
         await self._try_goodreads(candidate, result, client)
         self._try_retained_discovery(candidate, result)
 
+        # The documented APIs are for filling gaps, not for re-answering a
+        # question already answered: skip them once anything valid exists, so a
+        # working run does not quietly spend its whole fallback budget.
+        if not result.resolved:
+            await self._try_live_fallbacks(candidate, result)
+
+        # Gutendex only when nothing else produced a record. Its budget is
+        # small on purpose: an outage upstream must not promote a public-domain
+        # mirror back into being the bulk source.
+        if not result.resolved:
+            await self._try_gutendex(candidate, result)
+
         return result
+
+    async def _try_live_fallbacks(self, candidate: CandidateBook, result: Resolution) -> None:
+        """Open Library Search and Google Books, each under its own budget."""
+        for source, budget in (
+            (SourceName.OPENLIBRARY, self._openlibrary_budget),
+            (SourceName.GOOGLEBOOKS, self._googlebooks_budget),
+        ):
+            await self._try_bulk_source(candidate, result, source, budget, attempt_no=2)
+
+    async def _try_gutendex(self, candidate: CandidateBook, result: Resolution) -> None:
+        await self._try_bulk_source(
+            candidate,
+            result,
+            SourceName.GUTENDEX,
+            self._gutendex_budget,
+            attempt_no=1,
+        )
+
+    async def _try_bulk_source(
+        self,
+        candidate: CandidateBook,
+        result: Resolution,
+        source: SourceName,
+        budget: Budget,
+        *,
+        attempt_no: int,
+    ) -> None:
+        """One bounded lookup against a documented API.
+
+        Every exit records an attempt. A source that was configured off, out of
+        budget, or simply had no match must all be distinguishable afterwards —
+        otherwise a run with a silent hole looks like a run with nothing to
+        find.
+        """
+        skip_reason = self._settings.skip_reason(source)
+        if skip_reason is not None:
+            result.attempts.append(
+                Attempt(
+                    candidate.candidate_key,
+                    source,
+                    attempt_no,
+                    Outcome.SKIPPED,
+                    skip_reason,
+                )
+            )
+            return
+
+        if not budget.try_spend():
+            result.attempts.append(
+                Attempt(
+                    candidate.candidate_key,
+                    source,
+                    attempt_no,
+                    Outcome.SKIPPED,
+                    f"per-run budget of {budget.limit} exhausted",
+                )
+            )
+            return
+
+        timer = _Timer(self._clock)
+        extractor = build_extractor(source, self._settings)
+        request = ExtractionRequest(max_records=1, query=candidate.lookup_query())
+
+        try:
+            async for item in extractor.fetch(request):
+                if isinstance(item, Rejected):
+                    result.rejections.append(item)
+                    continue
+                result.observations.append(item)
+                result.attempts.append(
+                    Attempt(
+                        candidate.candidate_key,
+                        source,
+                        attempt_no,
+                        Outcome.RESOLVED,
+                        None,
+                        timer.elapsed_ms,
+                    )
+                )
+                return
+        except SourceUnavailableError as error:
+            result.attempts.append(
+                Attempt(
+                    candidate.candidate_key,
+                    source,
+                    attempt_no,
+                    Outcome.UNAVAILABLE,
+                    str(error),
+                    timer.elapsed_ms,
+                )
+            )
+            return
+        except MissingCredentialError as error:
+            # Our configuration gap, not the provider's outage. Recording it as
+            # unavailable would send someone hunting a fault at Google.
+            result.attempts.append(
+                Attempt(
+                    candidate.candidate_key,
+                    source,
+                    attempt_no,
+                    Outcome.SKIPPED,
+                    str(error),
+                    timer.elapsed_ms,
+                )
+            )
+            return
+
+        result.attempts.append(
+            Attempt(
+                candidate.candidate_key,
+                source,
+                attempt_no,
+                Outcome.NO_MATCH,
+                None,
+                timer.elapsed_ms,
+            )
+        )
 
     async def _try_goodreads(
         self,
