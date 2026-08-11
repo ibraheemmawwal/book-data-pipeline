@@ -32,6 +32,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -47,6 +50,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       # --cov-fail-under=0 overrides the project's fail_under for this job.
       # One job cannot fairly judge coverage of code another job exercises:
@@ -74,6 +80,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       # testcontainers starts its own PostgreSQL 16, matching the deployment
       # target. A service container would be a second, differently-configured
@@ -102,6 +111,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       - uses: actions/download-artifact@v8
         with:
