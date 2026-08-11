@@ -405,3 +405,27 @@ class TestBudgetEnforcement:
         )
         assert live.outcome is Outcome.UNAVAILABLE
         assert not result.resolved
+
+
+class TestMissingCredentialHandling:
+    @respx.mock
+    async def test_a_credential_error_mid_fetch_is_a_skip(self, settings: Settings) -> None:
+        # GoogleBooksExtractor raises before any request when the key is
+        # absent. Recording that as unavailable would send someone hunting a
+        # fault at Google rather than at our configuration.
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        # Enabled, budgeted, but keyless: skip_reason lets it through and the
+        # extractor raises MissingCredentialError from inside fetch.
+        keyless = settings.model_copy(update={"googlebooks_api_key": None})
+        resolver = CatalogueResolver(keyless)
+        object.__setattr__(
+            resolver, "_settings", keyless.model_copy(update={"googlebooks_enabled": True})
+        )
+
+        result = await resolver.resolve(candidate())
+
+        googlebooks = next(a for a in result.attempts if a.source is SourceName.GOOGLEBOOKS)
+        assert googlebooks.outcome is Outcome.SKIPPED

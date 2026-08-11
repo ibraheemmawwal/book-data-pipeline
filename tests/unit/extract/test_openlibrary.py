@@ -12,6 +12,7 @@ import pytest
 import respx
 
 from pipeline.config import Settings
+from pipeline.extract import openlibrary
 from pipeline.extract.base import ExtractionRequest, Rejected
 from pipeline.extract.openlibrary import OpenLibraryExtractor
 from pipeline.models.domain import RawBook, SourceName
@@ -281,3 +282,163 @@ class TestPerItemIsolation:
 
         assert len([item for item in items if isinstance(item, Rejected)]) == 1
         assert len([item for item in items if isinstance(item, RawBook)]) == 1
+
+
+class TestDumpShapedDocuments:
+    """Open Library speaks two shapes and this mapper reads both.
+
+    Search documents carry ``author_name``; dump editions carry author *keys*
+    plus a ``by_statement``. Reading only the search shape silently dropped
+    every author name the dump supplied — an end-to-end run loaded 5,890 books
+    and zero authors before this was caught.
+    """
+
+    def test_a_by_statement_supplies_the_author(self) -> None:
+        book = openlibrary.map_payload(
+            {"key": "/books/OL1M", "title": "Antifa", "by_statement": "by Mark Bray"}
+        )
+
+        assert isinstance(book, RawBook)
+        assert [a.name for a in book.authors] == ["Mark Bray"]
+
+    @pytest.mark.parametrize(
+        ("statement", "expected"),
+        [
+            ("by Mark Bray", "Mark Bray"),
+            ("par Victor Hugo", "Victor Hugo"),
+            ("von Franz Kafka", "Franz Kafka"),
+            ("Mark Bray", "Mark Bray"),
+            ("by Mark Bray.", "Mark Bray"),
+            ("  by  Mark Bray  ", "Mark Bray"),
+        ],
+    )
+    def test_the_leading_preposition_is_stripped(self, statement: str, expected: str) -> None:
+        # The preposition is noise once the name is a search term.
+        book = openlibrary.map_payload(
+            {"key": "/books/OL1M", "title": "T", "by_statement": statement}
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.authors[0].name == expected
+
+    def test_author_name_still_wins_when_present(self) -> None:
+        # A search document's structured field beats prose.
+        book = openlibrary.map_payload(
+            {
+                "key": "/works/OL1W",
+                "title": "T",
+                "author_name": ["Structured Name"],
+                "by_statement": "by Prose Name",
+            }
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.authors[0].name == "Structured Name"
+
+    @pytest.mark.parametrize("statement", ["", "   ", "by ", None, 42])
+    def test_an_unusable_by_statement_yields_no_author(self, statement: object) -> None:
+        book = openlibrary.map_payload(
+            {"key": "/books/OL1M", "title": "T", "by_statement": statement}
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.authors == []
+
+
+class TestDumpFieldShapes:
+    """Open Library's two shapes share almost no field names.
+
+    Search returns isbn / first_publish_year / publisher / language; a dump
+    edition returns isbn_13 / publish_date / publishers / languages. Reading
+    only the search shape produced 6,000 title-only books in an end-to-end run
+    — no ISBN, no year, no publisher, no subject between them.
+    """
+
+    @staticmethod
+    def dump_edition(**fields: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "key": "/books/OL1M",
+            "title": "Index to the House of Lords Debates",
+            "isbn_13": ["9780107716837"],
+            "isbn_10": ["0107716836"],
+            "publish_date": "December 31, 1996",
+            "publishers": ["Stationery Office Books"],
+            "number_of_pages": 8,
+            "subjects": ["Parliament", "Debates"],
+            "languages": [{"key": "/languages/eng"}],
+        }
+        return base | fields
+
+    def test_dump_isbns_are_read(self) -> None:
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert "9780107716837" in book.isbns
+        assert "0107716836" in book.isbns
+
+    def test_the_edition_publish_date_is_read(self) -> None:
+        # Free text, handed to transform's parse_year rather than parsed twice.
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert book.published == "December 31, 1996"
+
+    def test_a_search_year_still_wins_when_present(self) -> None:
+        # A work's first_publish_year is the more specific claim.
+        book = openlibrary.map_payload(self.dump_edition(first_publish_year=1965))
+
+        assert isinstance(book, RawBook)
+        assert book.published == "1965"
+
+    def test_dump_publishers_are_read(self) -> None:
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert book.publisher == "Stationery Office Books"
+
+    def test_dump_page_count_is_read(self) -> None:
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert book.page_count == 8
+
+    def test_dump_subjects_are_read(self) -> None:
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert "Parliament" in book.subjects
+
+    def test_dump_languages_are_unwrapped_from_their_keys(self) -> None:
+        # [{"key": "/languages/eng"}] rather than ["eng"].
+        book = openlibrary.map_payload(self.dump_edition())
+
+        assert isinstance(book, RawBook)
+        assert book.languages == ["eng"]
+
+    def test_the_search_shape_is_unaffected(self) -> None:
+        book = openlibrary.map_payload(
+            {
+                "key": "/works/OL1W",
+                "title": "Dune",
+                "isbn": ["9780441172719"],
+                "first_publish_year": 1965,
+                "publisher": ["Ace"],
+                "language": ["eng"],
+                "subject": ["Science fiction"],
+                "number_of_pages_median": 412,
+            }
+        )
+
+        assert isinstance(book, RawBook)
+        assert book.isbns == ["9780441172719"]
+        assert book.published == "1965"
+        assert book.publisher == "Ace"
+        assert book.languages == ["eng"]
+        assert book.page_count == 412
+
+    def test_a_record_with_neither_shape_still_maps(self) -> None:
+        book = openlibrary.map_payload({"key": "/books/OL9M", "title": "Bare"})
+
+        assert isinstance(book, RawBook)
+        assert book.isbns == []
+        assert book.published is None

@@ -29,6 +29,7 @@ from typing import Any
 
 import structlog
 
+from pipeline.extract.openlibrary import author_names_from_by_statement
 from pipeline.models.domain import CandidateBook
 from pipeline.transform.isbn import to_isbn13
 
@@ -37,10 +38,6 @@ logger = structlog.get_logger(__name__)
 EDITION_TYPE = "/type/edition"
 DUMP_COLUMNS = 5
 READ_CHUNK_BYTES = 1024 * 1024
-
-# "by Frank Herbert" / "par Quelqu'un" — the leading preposition is noise once
-# the name is used as a search term.
-_BY_PREFIXES = ("by ", "par ", "von ", "de ")
 
 
 class TruncatedDumpError(Exception):
@@ -80,27 +77,6 @@ def verify_checksum(path: Path, expected_sha256: str) -> None:
             f"expected {expected_sha256.strip().lower()}, got {actual}"
         )
         raise ChecksumMismatchError(msg)
-
-
-def _author_names(document: dict[str, Any]) -> list[str]:
-    """Recover resolvable author names.
-
-    Edition records carry author *keys*, not names, and a key cannot be turned
-    into a search query — the TRD is explicit that a key alone is not a
-    resolvable candidate. ``by_statement`` is the only place in an edition
-    record a usable name appears.
-    """
-    statement = document.get("by_statement")
-    if not isinstance(statement, str):
-        return []
-
-    name = statement.strip().rstrip(".").strip()
-    lowered = name.lower()
-    for prefix in _BY_PREFIXES:
-        if lowered.startswith(prefix):
-            name = name[len(prefix) :].strip()
-            break
-    return [name] if name else []
 
 
 def _isbns(document: dict[str, Any]) -> list[str]:
@@ -161,7 +137,7 @@ def _to_candidate(document: dict[str, Any]) -> CandidateBook | None:
     if not isinstance(key, str) or not key:
         return None
 
-    authors = _author_names(document)
+    authors = author_names_from_by_statement(document)
     isbns = _isbns(document)
     if not authors and not isbns:
         return None

@@ -38,7 +38,12 @@ from pipeline.models.db import (
     series_sources,
     subjects,
 )
-from pipeline.models.domain import CleanBook, RawBook, SourceName
+from pipeline.models.domain import (
+    CleanBook,
+    RawBook,
+    RawSeriesMembership,
+    SourceName,
+)
 from pipeline.transform import canonicalise
 
 pytestmark = pytest.mark.integration
@@ -800,3 +805,72 @@ class TestResolutionAttempts:
                     outcome="invented",
                 )
             )
+
+
+class TestSeriesProvenance:
+    def test_a_confirmed_series_id_is_recorded_as_provenance(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Autocomplete carries no series id; a detail page's /series/ link
+        # does, and that is what makes the relationship evidenced rather than
+        # inferred. The provenance row is how that stays auditable.
+        record = RawBook(
+            source=SourceName.GOODREADS,
+            source_id="gr9",
+            title="A Game of Thrones",
+            series=[
+                RawSeriesMembership(
+                    name="A Song of Ice and Fire",
+                    source_series_id="45175",
+                    position="1",
+                    confirmed=True,
+                )
+            ],
+            raw_payload={
+                "bookId": "gr9",
+                "title": "A Game of Thrones",
+                # What _enrich stores after a detail fetch, so the recompute
+                # can rebuild the same relationship without re-fetching.
+                "_detail": {
+                    "series_label": "Book 1 in the A Song of Ice and Fire series",
+                    "series_id": "45175",
+                },
+            },
+        )
+        CatalogueLoader().load(engine, [_clean(record)])
+
+        stored = connection.execute(
+            select(series_sources.c.source_series_id, series_sources.c.raw_payload)
+        ).one()
+        assert stored.source_series_id == "45175"
+        assert stored.raw_payload["confirmed"] is True
+
+    def test_reloading_a_confirmed_series_does_not_duplicate_provenance(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        record = RawBook(
+            source=SourceName.GOODREADS,
+            source_id="gr9",
+            title="A Game of Thrones",
+            series=[
+                RawSeriesMembership(
+                    name="A Song of Ice and Fire",
+                    source_series_id="45175",
+                    position="1",
+                    confirmed=True,
+                )
+            ],
+            raw_payload={
+                "bookId": "gr9",
+                "title": "A Game of Thrones",
+                "_detail": {
+                    "series_label": "Book 1 in the A Song of Ice and Fire series",
+                    "series_id": "45175",
+                },
+            },
+        )
+        loader = CatalogueLoader()
+        for _ in range(3):
+            loader.load(engine, [_clean(record)])
+
+        assert count(connection, series_sources) == 1

@@ -358,6 +358,7 @@ def parse_book_detail(markup: str) -> BookDetail:
             confirmed=source_series_id is not None,
         )
         payload["series_label"] = node.attributes.get("aria-label")
+        payload["series_id"] = source_series_id
         break
 
     return BookDetail(
