@@ -110,6 +110,22 @@ markers = [
 [tool.coverage.run]
 source = ["src"]
 branch = true
+# Every CI test job measures without gating and uploads its data file; one
+# final job combines them and enforces the threshold. The load and consumer
+# modules are exercised almost entirely by container-backed tests, so a
+# unit-only gate would put them in the denominator and none of them in the
+# numerator.
+#
+# parallel      — unique suffix per data file, so uploads do not collide.
+# relative_files — a job inside a container records /app/src/... while the
+#                 runner records /home/runner/work/...; without this, combine
+#                 treats them as different files and total coverage falls as
+#                 jobs are added.
+parallel = true
+relative_files = true
+
+[tool.coverage.paths]
+source = ["src", "*/src", "/app/src"]
 
 [tool.coverage.report]
 exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]
