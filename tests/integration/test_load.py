@@ -13,10 +13,17 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Connection, Engine, insert, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from pipeline.extract import goodreads, googlebooks, gutendex, openlibrary
 from pipeline.extract.base import Rejected
-from pipeline.load import CatalogueLoader, LoadResult, record_rejection
+from pipeline.extract.resolver import Attempt, Outcome
+from pipeline.load import (
+    CatalogueLoader,
+    LoadResult,
+    record_attempts,
+    record_rejection,
+)
 from pipeline.models.db import authors as authors_table
 from pipeline.models.db import (
     book_authors,
@@ -26,6 +33,7 @@ from pipeline.models.db import (
     books,
     ingestion_runs,
     rejected_records,
+    resolution_attempts,
     series,
     series_sources,
     subjects,
@@ -684,3 +692,111 @@ class TestSeries:
         CatalogueLoader().load(engine, [goodreads_payload()])
 
         assert count(connection, series_sources) == 0
+
+
+class TestResolutionAttempts:
+    """Persisting why each source was or was not used.
+
+    With an unofficial primary source this is operational data: without it, a
+    run that fell back for every candidate looks exactly like one that never
+    needed to.
+    """
+
+    def _run_id(self, engine: Engine) -> uuid.UUID:
+        run_id = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(insert(ingestion_runs).values(id=run_id, dag_run_id=f"cli:{run_id}"))
+        return run_id
+
+    def _attempt(self, **overrides: Any) -> Attempt:
+        base: dict[str, Any] = {
+            "candidate_key": "/works/OL1W",
+            "source": SourceName.GOODREADS,
+            "attempt_no": 1,
+            "outcome": Outcome.RESOLVED,
+            "fallback_reason": None,
+            "duration_ms": 42,
+        }
+        return Attempt(**(base | overrides))
+
+    def test_attempts_are_persisted(self, engine: Engine, connection: Connection) -> None:
+        run_id = self._run_id(engine)
+        with engine.begin() as conn:
+            written = record_attempts(
+                conn,
+                run_id,
+                [
+                    self._attempt(),
+                    self._attempt(
+                        source=SourceName.OPENLIBRARY,
+                        outcome=Outcome.SKIPPED,
+                        fallback_reason="no retained discovery payload",
+                    ),
+                ],
+            )
+
+        assert written == 2
+        assert count(connection, resolution_attempts) == 2
+
+    def test_the_reason_a_source_was_skipped_survives(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        run_id = self._run_id(engine)
+        with engine.begin() as conn:
+            record_attempts(
+                conn,
+                run_id,
+                [self._attempt(outcome=Outcome.SKIPPED, fallback_reason="circuit open")],
+            )
+
+        stored = connection.execute(
+            select(resolution_attempts.c.outcome, resolution_attempts.c.fallback_reason)
+        ).one()
+
+        assert stored.outcome == "skipped"
+        assert stored.fallback_reason == "circuit open"
+
+    def test_rewriting_the_same_attempt_is_idempotent(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # An Airflow retry re-resolves the same candidates; the attempt record
+        # must never be the thing that breaks a rerun.
+        run_id = self._run_id(engine)
+        for outcome in (Outcome.UNAVAILABLE, Outcome.RESOLVED):
+            with engine.begin() as conn:
+                record_attempts(conn, run_id, [self._attempt(outcome=outcome)])
+
+        assert count(connection, resolution_attempts) == 1
+        assert connection.execute(select(resolution_attempts.c.outcome)).scalar_one() == "resolved"
+
+    def test_an_empty_list_writes_nothing(self, engine: Engine, connection: Connection) -> None:
+        run_id = self._run_id(engine)
+        with engine.begin() as conn:
+            assert record_attempts(conn, run_id, []) == 0
+
+        assert count(connection, resolution_attempts) == 0
+
+    def test_attempts_are_removed_with_their_run(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        run_id = self._run_id(engine)
+        with engine.begin() as conn:
+            record_attempts(conn, run_id, [self._attempt()])
+            conn.execute(ingestion_runs.delete().where(ingestion_runs.c.id == run_id))
+
+        assert count(connection, resolution_attempts) == 0
+
+    def test_an_unknown_outcome_is_refused_by_the_database(self, engine: Engine) -> None:
+        # The CHECK constraint is the last line of defence if the enum and the
+        # schema ever drift apart.
+        run_id = self._run_id(engine)
+        with pytest.raises(IntegrityError), engine.begin() as conn:
+            conn.execute(
+                insert(resolution_attempts).values(
+                    run_id=run_id,
+                    candidate_key="/works/OL1W",
+                    source="goodreads",
+                    attempt_no=1,
+                    outcome="invented",
+                )
+            )

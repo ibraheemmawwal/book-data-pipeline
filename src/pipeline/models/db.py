@@ -47,6 +47,14 @@ metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 SOURCE_NAMES = ("goodreads", "openlibrary", "googlebooks", "gutendex")
 RUN_STATUSES = ("running", "processing", "success", "partial_success", "failed")
+RESOLUTION_OUTCOMES = (
+    "resolved",
+    "partial",
+    "no_match",
+    "contract_failure",
+    "unavailable",
+    "skipped",
+)
 SOURCE_RUN_STATUSES = ("running", "success", "skipped", "failed")
 REJECTION_STAGES = ("extract", "transform", "load")
 MARKER_TOPICS = ("books.raw", "books.clean")
@@ -340,6 +348,39 @@ source_runs = Table(
     CheckConstraint(_in_list("status", SOURCE_RUN_STATUSES), name="status_known"),
 )
 
+# One row per source attempt per candidate. With an unofficial primary source,
+# which source answered and why the others were not used is operational data
+# rather than debug noise — without it, a run that fell back for every
+# candidate looks identical to one that never needed to.
+resolution_attempts = Table(
+    "resolution_attempts",
+    metadata,
+    Column(
+        "run_id",
+        UUID(as_uuid=True),
+        ForeignKey("ingestion_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("candidate_key", Text, primary_key=True),
+    Column("source", Text, primary_key=True),
+    Column("attempt_no", SmallInteger, primary_key=True),
+    Column("outcome", Text, nullable=False),
+    Column("fallback_reason", Text),
+    Column("duration_ms", Integer),
+    Column("observed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(_in_list("source", SOURCE_NAMES), name="source_known"),
+    CheckConstraint(_in_list("outcome", RESOLUTION_OUTCOMES), name="outcome_known"),
+    CheckConstraint("attempt_no > 0", name="attempt_no_positive"),
+    CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="duration_non_negative"),
+)
+
+Index(
+    "idx_resolution_attempts_run_outcome",
+    resolution_attempts.c.run_id,
+    resolution_attempts.c.source,
+    resolution_attempts.c.outcome,
+)
+
 # Broker topology frozen at barrier time. An event must never be an authority
 # for topology: a marker carrying its own expectation would let a mis-produced
 # event redefine what completion means.
@@ -411,6 +452,7 @@ __all__ = [
     "ingestion_runs",
     "metadata",
     "rejected_records",
+    "resolution_attempts",
     "run_partition_markers",
     "run_topic_partitions",
     "series",
