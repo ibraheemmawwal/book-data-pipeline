@@ -143,7 +143,7 @@ class GoogleBooksExtractor:
                 authors=[RawAuthor(name=n) for n in info.get("authors") or [] if n],
                 subjects=list(info.get("categories") or []),
                 isbns=_isbns(info),
-                language=info.get("language"),
+                languages=[info["language"]] if info.get("language") else [],
                 published=info.get("publishedDate"),
                 publisher=info.get("publisher"),
                 page_count=info.get("pageCount"),

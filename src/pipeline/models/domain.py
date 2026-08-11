@@ -123,7 +123,10 @@ class RawBook(_Frozen):
     subjects: list[str] = Field(default_factory=list)
 
     isbns: list[str] = Field(default_factory=list)
-    language: str | None = None
+    # Plural because sources are plural. Open Library reports one entry per
+    # edition of a work, so collapsing the list here would silently pick an
+    # arbitrary edition's language for the whole book.
+    languages: list[str] = Field(default_factory=list)
     published: str | None = None
     publisher: str | None = None
     page_count: int | None = None

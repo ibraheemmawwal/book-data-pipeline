@@ -137,7 +137,7 @@ class OpenLibraryExtractor:
                 authors=_to_authors(doc),
                 subjects=list(doc.get("subject") or [])[:50],
                 isbns=list(doc.get("isbn") or []),
-                language=_first(doc.get("language")),
+                languages=list(doc.get("language") or []),
                 published=_year_as_text(doc.get("first_publish_year")),
                 publisher=_first(doc.get("publisher")),
                 page_count=doc.get("number_of_pages_median"),

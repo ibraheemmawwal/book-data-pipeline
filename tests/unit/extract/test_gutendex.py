@@ -68,7 +68,7 @@ class TestMapping:
         assert len(books[0].description) > 50
 
     @respx.mock
-    async def test_language_is_left_untranslated_for_transform(
+    async def test_languages_are_left_untranslated_for_transform(
         self, extractor: GutendexExtractor
     ) -> None:
         # Gutendex speaks ISO 639-1 ("en"); mapping to 639-3 is transform's job
@@ -80,7 +80,7 @@ class TestMapping:
 
         books = [b for b in await collect(extractor) if isinstance(b, RawBook)]
 
-        assert books[0].language == "en"
+        assert books[0].languages == ["en"]
 
     @respx.mock
     async def test_cover_url_comes_from_the_jpeg_format(self, extractor: GutendexExtractor) -> None:

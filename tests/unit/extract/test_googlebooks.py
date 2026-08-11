@@ -116,7 +116,7 @@ class TestMapping:
         assert hawking.publisher == "Bantam"
         assert hawking.page_count == 212
         assert hawking.published == "1998-09-01"
-        assert hawking.language == "en"
+        assert hawking.languages == ["en"]
 
     @respx.mock
     async def test_collects_both_isbn_forms(self, extractor: GoogleBooksExtractor) -> None:

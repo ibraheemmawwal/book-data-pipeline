@@ -177,6 +177,23 @@ class TestMapping:
         assert [a.source_author_id for a in books[0].authors] == ["OL1A", None, None]
 
     @respx.mock
+    async def test_every_edition_language_is_preserved(
+        self, extractor: OpenLibraryExtractor
+    ) -> None:
+        # A work carries one language per edition. Picking the first tagged
+        # Dorian Gray as Czech in a live run, so the whole list is kept and
+        # transform decides what, if anything, it means.
+        doc = load_fixture("openlibrary_search.json")["docs"][0]
+        doc = {**doc, "language": ["eng", "cze", "fre"]}
+        respx.get(SEARCH).mock(
+            return_value=httpx.Response(200, json={"numFound": 1, "docs": [doc]})
+        )
+
+        books = [b for b in await collect(extractor, limit=1) if isinstance(b, RawBook)]
+
+        assert books[0].languages == ["eng", "cze", "fre"]
+
+    @respx.mock
     async def test_carries_no_author_lifespan(self, extractor: OpenLibraryExtractor) -> None:
         # Search results have no birth or death year; only Gutendex supplies it.
         respx.get(SEARCH).mock(

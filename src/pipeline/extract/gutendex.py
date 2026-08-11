@@ -103,7 +103,7 @@ class GutendexExtractor:
                 title=record.get("title"),  # type: ignore[arg-type]
                 authors=[_to_author(a) for a in record.get("authors", [])],
                 subjects=list(record.get("subjects", [])),
-                language=_first(record.get("languages")),
+                languages=list(record.get("languages") or []),
                 description=_first(record.get("summaries")),
                 cover_url=(record.get("formats") or {}).get(COVER_MIME),
                 download_count=record.get("download_count"),
