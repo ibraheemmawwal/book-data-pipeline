@@ -1,0 +1,217 @@
+"""Environment-driven configuration.
+
+``Settings`` is a pure function of the process environment. It reads no
+``.env`` file of its own, so a value is either explicitly passed, exported by
+the caller, or the documented default — which is what makes both tests and
+container runs predictable. Load a local file explicitly instead:
+
+    uv run --env-file .env pipeline ingest
+
+Two rules are encoded here rather than left to the extractors, because both are
+usage-policy commitments rather than tuning knobs: Open Library is capped at one
+request per second and requires an identifying contact address.
+
+Google Books is credential-gated. A missing key must produce an observable skip
+recorded in ``source_runs``, never a crash and never a silent no-op, so that a
+clean clone starts without credentials.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Annotated, Any, Self
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pipeline import __version__
+from pipeline.models.domain import SourceName
+
+__all__ = ["Settings", "SourceName"]
+
+REPOSITORY_URL = "https://github.com/ibraheemmawwal/book-data-pipeline"
+
+# The load stage commits one transaction per batch; the TRD caps that at 1,000
+# records so a failure never rolls back an unbounded amount of work.
+MAX_LOAD_BATCH_SIZE = 1000
+
+# Politeness cap for Open Library. Deliberately a ceiling, not a default.
+MAX_OPENLIBRARY_REQUESTS_PER_SECOND = 1.0
+
+ENV_PREFIX = "PIPELINE_"
+
+_ACCEPTED_DATABASE_SCHEMES = ("postgresql://", "postgresql+psycopg://")
+
+# Extraction order, which is not the canonical-priority order in SourceName.
+# Gutendex is the bulk source and runs first; the other two enrich.
+_EXTRACTION_ORDER = (SourceName.GUTENDEX, SourceName.OPENLIBRARY, SourceName.GOOGLEBOOKS)
+
+
+class Settings(BaseSettings):
+    """Runtime configuration for every stage of the pipeline."""
+
+    model_config = SettingsConfigDict(
+        env_prefix=ENV_PREFIX,
+        # A typo'd PIPELINE_* variable that silently does nothing is a
+        # debugging trap, so unknown ones fail at startup.
+        extra="forbid",
+        frozen=True,
+    )
+
+    # --- Catalogue database -------------------------------------------------
+    database_url: str
+
+    # --- Staging ------------------------------------------------------------
+    staging_dir: Path = Path("./staging")
+    staging_retention_days: Annotated[int, Field(ge=0)] = 7
+
+    # --- Load ---------------------------------------------------------------
+    load_batch_size: Annotated[int, Field(ge=1, le=MAX_LOAD_BATCH_SIZE)] = MAX_LOAD_BATCH_SIZE
+
+    # --- HTTP ---------------------------------------------------------------
+    http_connect_timeout_seconds: Annotated[float, Field(gt=0)] = 5.0
+    http_read_timeout_seconds: Annotated[float, Field(gt=0)] = 30.0
+    http_max_attempts: Annotated[int, Field(ge=1)] = 5
+
+    # --- Gutendex -----------------------------------------------------------
+    gutendex_enabled: bool = True
+    gutendex_base_url: str = "https://gutendex.com"
+    gutendex_max_records: Annotated[int, Field(ge=1)] = 6000
+
+    # --- Open Library -------------------------------------------------------
+    openlibrary_enabled: bool = True
+    openlibrary_base_url: str = "https://openlibrary.org"
+    openlibrary_contact_email: str | None = None
+    openlibrary_requests_per_second: Annotated[
+        float, Field(gt=0, le=MAX_OPENLIBRARY_REQUESTS_PER_SECOND)
+    ] = MAX_OPENLIBRARY_REQUESTS_PER_SECOND
+    openlibrary_max_records: Annotated[int, Field(ge=1)] = 500
+
+    # --- Google Books -------------------------------------------------------
+    googlebooks_enabled: bool = True
+    googlebooks_base_url: str = "https://www.googleapis.com"
+    googlebooks_api_key: SecretStr | None = None
+    googlebooks_max_records: Annotated[int, Field(ge=1)] = 500
+
+    # --- Kafka (phase 2) ----------------------------------------------------
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_raw_topic: str = "books.raw"
+    kafka_clean_topic: str = "books.clean"
+    kafka_dlq_topic: str = "books.dlq"
+    kafka_topic_partitions: Annotated[int, Field(ge=1)] = 3
+    kafka_max_processing_attempts: Annotated[int, Field(ge=1)] = 3
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_prefixed_variables(cls, data: Any) -> Any:
+        """Fail on a ``PIPELINE_*`` variable that matches no field.
+
+        ``extra="forbid"`` cannot catch these: the environment source only ever
+        reads variables it already has a field for, so a misspelled name is
+        invisible to pydantic and silently keeps the default. That is precisely
+        the failure this project cannot afford — a mistyped
+        ``PIPELINE_LOAD_BATCH_SIZE`` would quietly ship the wrong transaction
+        size — so the environment is checked directly.
+        """
+        known = {f"{ENV_PREFIX}{name.upper()}" for name in cls.model_fields}
+        unknown = sorted(
+            name
+            for name in os.environ
+            if name.upper().startswith(ENV_PREFIX) and name.upper() not in known
+        )
+        if unknown:
+            msg = f"unknown {ENV_PREFIX}* environment variables: {', '.join(unknown)}"
+            raise ValueError(msg)
+        return data
+
+    @field_validator("database_url")
+    @classmethod
+    def _require_postgresql(cls, value: str) -> str:
+        """The schema depends on PostgreSQL-only features.
+
+        ``tsvector`` generated columns, ``pg_trgm`` and ``ON CONFLICT`` are not
+        portable, so a non-PostgreSQL URL is a configuration error rather than
+        a degraded mode.
+        """
+        if not value.startswith(_ACCEPTED_DATABASE_SCHEMES):
+            accepted = " or ".join(_ACCEPTED_DATABASE_SCHEMES)
+            msg = f"database_url must start with {accepted}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("googlebooks_api_key", mode="before")
+    @classmethod
+    def _blank_key_is_absent(cls, value: object) -> object:
+        """``PIPELINE_GOOGLEBOOKS_API_KEY=`` means "not configured".
+
+        An empty string would otherwise read as a present-but-invalid key and
+        turn a clean skip into a 400 from Google.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _require_openlibrary_contact(self) -> Self:
+        """Open Library requires identified requests.
+
+        Anonymous bulk traffic is what gets a source blocked, so the address is
+        mandatory whenever the extractor is enabled.
+        """
+        if self.openlibrary_enabled and not self.openlibrary_contact_email:
+            msg = (
+                "openlibrary_contact_email is required when openlibrary_enabled is true; "
+                "Open Library's usage policy requires identified requests"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _require_an_active_source(self) -> Self:
+        """A run with nothing to extract is a misconfiguration, not a no-op."""
+        if not any(self._is_enabled(source) for source in _EXTRACTION_ORDER):
+            names = ", ".join(source.value for source in _EXTRACTION_ORDER)
+            msg = f"at least one source must be enabled (one of: {names})"
+            raise ValueError(msg)
+        return self
+
+    def _is_enabled(self, source: SourceName) -> bool:
+        match source:
+            case SourceName.GUTENDEX:
+                return self.gutendex_enabled
+            case SourceName.OPENLIBRARY:
+                return self.openlibrary_enabled
+            case SourceName.GOOGLEBOOKS:
+                return self.googlebooks_enabled
+
+    def user_agent(self) -> str:
+        """The ``User-Agent`` sent to every source.
+
+        Carries the contact address when Open Library is in play, because that
+        is the source whose policy requires it.
+        """
+        identity = f"book-data-pipeline/{__version__} (+{REPOSITORY_URL}"
+        if self.openlibrary_enabled and self.openlibrary_contact_email:
+            identity += f"; {self.openlibrary_contact_email}"
+        return identity + ")"
+
+    def active_sources(self) -> tuple[SourceName, ...]:
+        """Sources that will actually run, in extraction order.
+
+        Gutendex leads because it supplies the bulk of the catalogue; the other
+        two are bounded enrichment passes.
+        """
+        return tuple(source for source in _EXTRACTION_ORDER if self.skip_reason(source) is None)
+
+    def skip_reason(self, source: SourceName) -> str | None:
+        """Why ``source`` will not run, or ``None`` if it will.
+
+        The string is written to ``source_runs.error`` so a skipped source is
+        visible in the run record instead of being inferred from a gap.
+        """
+        if not self._is_enabled(source):
+            return f"{source.value} is disabled by configuration"
+        if source is SourceName.GOOGLEBOOKS and self.googlebooks_api_key is None:
+            return "googlebooks is enabled but no API key is configured"
+        return None
