@@ -17,6 +17,8 @@ dependencies = [
     "sqlalchemy>=2.0.36,<2.1",
     "alembic>=1.14,<2",
     "psycopg[binary]>=3.2,<4",
+    "selectolax>=0.3.21",
+    "rapidfuzz>=3.9,<4",
 ]
 
 [project.optional-dependencies]
@@ -82,7 +84,8 @@ select = [
 "tests/**" = ["PLR2004", "ARG001"]
 # Alembic writes these. Reformatting generated DDL by hand invites a typo in
 # the one file whose correctness cannot be checked by reading the diff.
-"migrations/versions/*" = ["E501"]
+# Alembic writes these from a template we do not control.
+"migrations/versions/*" = ["E501", "UP035", "UP007", "I001"]
 # These modules exist to fold ambiguous Unicode punctuation into its plain
 # equivalents, so the "ambiguous character" they are flagged for is the input
 # they are written to handle. Silencing it here rather than project-wide keeps

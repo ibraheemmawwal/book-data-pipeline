@@ -31,13 +31,15 @@ from pipeline.transform.normalise import (
     select_language,
 )
 
-# Applied only when two records look equally complete. Open Library has the
-# best bibliographic metadata, Google Books is a useful third opinion, and
-# Gutendex is authoritative about Project Gutenberg and little else.
+# Applied only when two records look equally complete. Goodreads is the
+# preferred resolver for title, author, description, series and edition facts.
+# Google Books and Open Library fill what it does not supply, and Gutendex is a
+# last resort that is authoritative about Project Gutenberg and little else.
 SOURCE_PRIORITY = {
-    SourceName.OPENLIBRARY: 0,
+    SourceName.GOODREADS: 0,
     SourceName.GOOGLEBOOKS: 1,
-    SourceName.GUTENDEX: 2,
+    SourceName.OPENLIBRARY: 2,
+    SourceName.GUTENDEX: 3,
 }
 
 # Fields resolved independently across candidates. Excludes identity, which is

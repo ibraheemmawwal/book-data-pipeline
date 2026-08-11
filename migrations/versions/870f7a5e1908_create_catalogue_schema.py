@@ -1,13 +1,12 @@
 """Create the catalogue schema.
 
 Everything the database needs is here, including the pg_trgm extension: the
-acceptance criterion is that a clean clone runs with no manual SQL, and a
-migration that assumes an extension already exists fails that on a fresh
-database. The extension must also precede the trigram indexes that use it.
+acceptance criterion is a clean clone with no manual SQL, and the trigram
+indexes cannot be created before the extension exists.
 
-Revision ID: 37d934c230b4
+Revision ID: 870f7a5e1908
 Revises:
-Create Date: 2026-08-11 10:54:45.096374
+Create Date: 2026-08-11 11:31:49.924489
 
 """
 
@@ -18,7 +17,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "37d934c230b4"
+revision: str = "870f7a5e1908"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -76,9 +75,11 @@ def upgrade() -> None:
         sa.Column("publisher", sa.Text(), nullable=True),
         sa.Column("page_count", sa.Integer(), nullable=True),
         sa.Column("download_count", sa.BigInteger(), nullable=True),
+        sa.Column("goodreads_average_rating", sa.Numeric(precision=3, scale=2), nullable=True),
         sa.Column("language", sa.Text(), nullable=True),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("cover_url", sa.Text(), nullable=True),
+        sa.Column("series_search_text", sa.Text(), server_default=sa.text("''"), nullable=False),
         sa.Column("content_hash", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
@@ -96,7 +97,7 @@ def upgrade() -> None:
             "search_vector",
             postgresql.TSVECTOR(),
             sa.Computed(
-                "setweight(to_tsvector('english', coalesce(title, '')), 'A') || setweight(to_tsvector('english', coalesce(subtitle, '')), 'B') || setweight(to_tsvector('english', coalesce(description, '')), 'C')",
+                "setweight(to_tsvector('english', coalesce(title, '')), 'A') || setweight(to_tsvector('english', coalesce(series_search_text, '')), 'A') || setweight(to_tsvector('english', coalesce(subtitle, '')), 'B') || setweight(to_tsvector('english', coalesce(description, '')), 'C')",
                 persisted=True,
             ),
             nullable=True,
@@ -112,6 +113,10 @@ def upgrade() -> None:
             name=op.f("ck_books_download_count_non_negative"),
         ),
         sa.CheckConstraint(
+            "goodreads_average_rating IS NULL OR goodreads_average_rating BETWEEN 0 AND 5",
+            name=op.f("ck_books_goodreads_average_rating_range"),
+        ),
+        sa.CheckConstraint(
             "page_count IS NULL OR page_count > 0", name=op.f("ck_books_page_count_positive")
         ),
         sa.CheckConstraint(
@@ -124,6 +129,14 @@ def upgrade() -> None:
     )
     op.create_index(
         "idx_books_search", "books", ["search_vector"], unique=False, postgresql_using="gin"
+    )
+    op.create_index(
+        "idx_books_series_text_trgm",
+        "books",
+        ["series_search_text"],
+        unique=False,
+        postgresql_using="gin",
+        postgresql_ops={"series_search_text": "gin_trgm_ops"},
     )
     op.create_index(
         "idx_books_title_keyset", "books", [sa.literal_column("lower(title)"), "id"], unique=False
@@ -160,6 +173,36 @@ def upgrade() -> None:
         sa.UniqueConstraint("dag_run_id", name=op.f("uq_ingestion_runs_dag_run_id")),
     )
     op.create_table(
+        "series",
+        sa.Column("id", sa.BigInteger(), nullable=False),
+        sa.Column("identity_key", sa.Text(), nullable=False),
+        sa.Column("name", sa.Text(), nullable=False),
+        sa.Column("normalized_name", sa.Text(), nullable=False),
+        sa.Column("description", sa.Text(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_series")),
+        sa.UniqueConstraint("identity_key", name=op.f("uq_series_identity_key")),
+    )
+    op.create_index(
+        "idx_series_name_trgm",
+        "series",
+        ["name"],
+        unique=False,
+        postgresql_using="gin",
+        postgresql_ops={"name": "gin_trgm_ops"},
+    )
+    op.create_table(
         "subjects",
         sa.Column("id", sa.BigInteger(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
@@ -175,7 +218,7 @@ def upgrade() -> None:
         sa.Column("source_birth_year", sa.SmallInteger(), nullable=True),
         sa.Column("source_death_year", sa.SmallInteger(), nullable=True),
         sa.CheckConstraint(
-            "source IN ('gutendex', 'openlibrary', 'googlebooks')",
+            "source IN ('goodreads', 'openlibrary', 'googlebooks', 'gutendex')",
             name=op.f("ck_author_sources_source_known"),
         ),
         sa.CheckConstraint(
@@ -218,6 +261,26 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("book_id", "author_id", name=op.f("pk_book_authors")),
     )
     op.create_table(
+        "book_series",
+        sa.Column("book_id", sa.BigInteger(), nullable=False),
+        sa.Column("series_id", sa.BigInteger(), nullable=False),
+        sa.Column("position", sa.Numeric(precision=8, scale=2), nullable=True),
+        sa.Column("confirmed", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.CheckConstraint(
+            "position IS NULL OR position >= 0", name=op.f("ck_book_series_position_non_negative")
+        ),
+        sa.ForeignKeyConstraint(
+            ["book_id"], ["books.id"], name=op.f("fk_book_series_book_id_books"), ondelete="CASCADE"
+        ),
+        sa.ForeignKeyConstraint(
+            ["series_id"],
+            ["series.id"],
+            name=op.f("fk_book_series_series_id_series"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("book_id", "series_id", name=op.f("pk_book_series")),
+    )
+    op.create_table(
         "book_sources",
         sa.Column("book_id", sa.BigInteger(), nullable=False),
         sa.Column("source", sa.Text(), nullable=False),
@@ -238,7 +301,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "source IN ('gutendex', 'openlibrary', 'googlebooks')",
+            "source IN ('goodreads', 'openlibrary', 'googlebooks', 'gutendex')",
             name=op.f("ck_book_sources_source_known"),
         ),
         sa.ForeignKeyConstraint(
@@ -324,6 +387,38 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("run_id", "topic", name=op.f("pk_run_topic_partitions")),
     )
     op.create_table(
+        "series_sources",
+        sa.Column("series_id", sa.BigInteger(), nullable=False),
+        sa.Column("source", sa.Text(), nullable=False),
+        sa.Column("source_series_id", sa.Text(), nullable=False),
+        sa.Column("raw_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("payload_hash", sa.Text(), nullable=False),
+        sa.Column(
+            "first_seen_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "last_seen_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "source IN ('goodreads', 'openlibrary', 'googlebooks', 'gutendex')",
+            name=op.f("ck_series_sources_source_known"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["series_id"],
+            ["series.id"],
+            name=op.f("fk_series_sources_series_id_series"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("source", "source_series_id", name=op.f("pk_series_sources")),
+    )
+    op.create_index("idx_series_sources_series_id", "series_sources", ["series_id"], unique=False)
+    op.create_table(
         "source_runs",
         sa.Column("run_id", sa.UUID(), nullable=False),
         sa.Column("source", sa.Text(), nullable=False),
@@ -348,6 +443,42 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("run_id", "source", name=op.f("pk_source_runs")),
+    )
+    op.create_table(
+        "book_series_sources",
+        sa.Column("book_id", sa.BigInteger(), nullable=False),
+        sa.Column("series_id", sa.BigInteger(), nullable=False),
+        sa.Column("source", sa.Text(), nullable=False),
+        sa.Column("source_book_id", sa.Text(), nullable=False),
+        sa.Column("source_series_id", sa.Text(), nullable=False),
+        sa.Column("position", sa.Numeric(precision=8, scale=2), nullable=True),
+        sa.Column("confirmed", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("raw_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.CheckConstraint(
+            "position IS NULL OR position >= 0",
+            name=op.f("ck_book_series_sources_position_non_negative"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["book_id", "series_id"],
+            ["book_series.book_id", "book_series.series_id"],
+            name=op.f("fk_book_series_sources_book_id_book_series"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["source", "source_book_id"],
+            ["book_sources.source", "book_sources.source_id"],
+            name=op.f("fk_book_series_sources_source_book_sources"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["source", "source_series_id"],
+            ["series_sources.source", "series_sources.source_series_id"],
+            name=op.f("fk_book_series_sources_source_series_sources"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint(
+            "source", "source_book_id", "source_series_id", name=op.f("pk_book_series_sources")
+        ),
     )
     op.create_table(
         "run_partition_markers",
@@ -378,15 +509,26 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Downgrade schema."""
     op.drop_table("run_partition_markers")
+    op.drop_table("book_series_sources")
     op.drop_table("source_runs")
+    op.drop_index("idx_series_sources_series_id", table_name="series_sources")
+    op.drop_table("series_sources")
     op.drop_table("run_topic_partitions")
     op.drop_table("rejected_records")
     op.drop_table("book_subjects")
     op.drop_index("idx_book_sources_book_id", table_name="book_sources")
     op.drop_table("book_sources")
+    op.drop_table("book_series")
     op.drop_table("book_authors")
     op.drop_table("author_sources")
     op.drop_table("subjects")
+    op.drop_index(
+        "idx_series_name_trgm",
+        table_name="series",
+        postgresql_using="gin",
+        postgresql_ops={"name": "gin_trgm_ops"},
+    )
+    op.drop_table("series")
     op.drop_table("ingestion_runs")
     op.drop_index(
         "idx_books_title_trgm",
@@ -395,6 +537,12 @@ def downgrade() -> None:
         postgresql_ops={"title": "gin_trgm_ops"},
     )
     op.drop_index("idx_books_title_keyset", table_name="books")
+    op.drop_index(
+        "idx_books_series_text_trgm",
+        table_name="books",
+        postgresql_using="gin",
+        postgresql_ops={"series_search_text": "gin_trgm_ops"},
+    )
     op.drop_index("idx_books_search", table_name="books", postgresql_using="gin")
     op.drop_table("books")
     op.drop_index(

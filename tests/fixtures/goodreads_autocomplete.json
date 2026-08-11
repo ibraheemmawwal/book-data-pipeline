@@ -1,0 +1,71 @@
+[
+  {
+    "imageUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1562726234i/13496._SY75_.jpg",
+    "bookId": "13496",
+    "workId": "1466917",
+    "bookUrl": "/book/show/13496.A_Game_of_Thrones",
+    "rank": 1,
+    "title": "A Game of Thrones (A Song of Ice and Fire, #1)",
+    "bookTitleBare": "A Game of Thrones",
+    "numPages": 835,
+    "avgRating": "4.45",
+    "ratingsCount": 2803742,
+    "author": {
+      "id": 346732,
+      "name": "George R.R. Martin",
+      "isGoodreadsAuthor": false,
+      "profileUrl": "https://www.goodreads.com/author/show/346732.George_R_R_Martin",
+      "worksListUrl": "https://www.goodreads.com/author/list/346732.George_R_R_Martin"
+    },
+    "description": {
+      "html": "Long ago, in a time forgotten, a preternatural event threw the seasons out of balance. In a land where summers can last decades and winters a lifetime, trouble is brewing. The…",
+      "truncated": true
+    }
+  },
+  {
+    "imageUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1376738412i/18337259._SY75_.jpg",
+    "bookId": "18337259",
+    "workId": "40783698",
+    "bookUrl": "/book/show/18337259-a-game-of-thrones-1",
+    "rank": 2,
+    "title": "A Game of Thrones #1",
+    "bookTitleBare": "A Game of Thrones #1",
+    "numPages": 32,
+    "avgRating": "4.62",
+    "ratingsCount": 124243,
+    "author": {
+      "id": 13557729,
+      "name": "Daniel Abraham",
+      "isGoodreadsAuthor": false,
+      "profileUrl": "https://www.goodreads.com/author/show/13557729.Daniel_Abraham",
+      "worksListUrl": "https://www.goodreads.com/author/list/13557729.Daniel_Abraham"
+    },
+    "description": {
+      "html": "A New York Times bestselling epic. A blockbuster TV series. And now, George R. R. Martin’s breathtaking fantasy masterpiece makes its powerful graphic novel debut—with all the…",
+      "truncated": true
+    }
+  },
+  {
+    "imageUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1369052110i/12962439._SX50_.jpg",
+    "bookId": "12962439",
+    "workId": "18120108",
+    "bookUrl": "/book/show/12962439-a-game-of-thrones",
+    "rank": 3,
+    "title": "A Game of Thrones: The Graphic Novel, Volume One",
+    "bookTitleBare": "A Game of Thrones: The Graphic Novel, Volume One",
+    "numPages": 240,
+    "avgRating": "4.50",
+    "ratingsCount": 47204,
+    "author": {
+      "id": 13557729,
+      "name": "Daniel Abraham",
+      "isGoodreadsAuthor": false,
+      "profileUrl": "https://www.goodreads.com/author/show/13557729.Daniel_Abraham",
+      "worksListUrl": "https://www.goodreads.com/author/list/13557729.Daniel_Abraham"
+    },
+    "description": {
+      "html": "<b>This graphic novel adaptation contains more than fifty pages of exclusive content not available in the original comic books, including</b><br/>  <br/> • a new Preface by George R. R. Martin…",
+      "truncated": true
+    }
+  }
+]

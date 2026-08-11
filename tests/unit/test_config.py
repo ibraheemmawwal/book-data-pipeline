@@ -109,9 +109,31 @@ class TestUserAgent:
 
 class TestActiveSources:
     def test_all_sources_active_when_configured(self) -> None:
-        active = settings(googlebooks_api_key="test-key").active_sources()
+        active = settings(
+            googlebooks_api_key="test-key",
+            goodreads_enabled=True,
+            goodreads_unofficial_source_accepted=True,
+        ).active_sources()
 
-        assert active == (SourceName.GUTENDEX, SourceName.OPENLIBRARY, SourceName.GOOGLEBOOKS)
+        # Resolution order, not the SourceName declaration order: Goodreads
+        # resolves first, documented APIs fill gaps, Gutendex is last resort.
+        assert active == (
+            SourceName.GOODREADS,
+            SourceName.OPENLIBRARY,
+            SourceName.GOOGLEBOOKS,
+            SourceName.GUTENDEX,
+        )
+
+    def test_goodreads_is_off_unless_both_gates_are_set(self) -> None:
+        # Reading an unofficial contract must never be a default.
+        assert SourceName.GOODREADS not in settings().active_sources()
+        assert SourceName.GOODREADS not in settings(goodreads_enabled=True).active_sources()
+
+    def test_enabling_without_accepting_the_risk_says_so(self) -> None:
+        reason = settings(goodreads_enabled=True).skip_reason(SourceName.GOODREADS)
+
+        assert reason is not None
+        assert "risk has not been accepted" in reason
 
     def test_googlebooks_is_skipped_without_a_key(self) -> None:
         loaded = settings(googlebooks_enabled=True, googlebooks_api_key=None)
