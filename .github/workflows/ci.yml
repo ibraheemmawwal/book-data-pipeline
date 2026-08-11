@@ -48,10 +48,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --all-groups
-      # Measures but does not gate. One job cannot fairly judge coverage of
-      # code another job exercises; the coverage job decides.
+      # --cov-fail-under=0 overrides the project's fail_under for this job.
+      # One job cannot fairly judge coverage of code another job exercises:
+      # unit tests alone score 90%, integration alone 54%. The coverage job
+      # combines them and decides.
       - name: Run unit tests
-        run: uv run pytest -m "not integration" --cov=src --cov-report=
+        run: uv run pytest -m "not integration" --cov=src --cov-report= --cov-fail-under=0
         env:
           COVERAGE_FILE: .coverage.unit
       - uses: actions/upload-artifact@v4
@@ -76,8 +78,11 @@ jobs:
       # testcontainers starts its own PostgreSQL 16, matching the deployment
       # target. A service container would be a second, differently-configured
       # database that the tests do not actually use.
+      # Measures only; see the note on the unit job.
       - name: Run integration tests
-        run: uv run pytest -m integration -p no:randomly --cov=src --cov-report=
+        run: >-
+          uv run pytest -m integration -p no:randomly
+          --cov=src --cov-report= --cov-fail-under=0
         env:
           COVERAGE_FILE: .coverage.postgres
       - uses: actions/upload-artifact@v4
