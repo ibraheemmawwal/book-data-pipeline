@@ -145,4 +145,10 @@ relative_files = true
 source = ["src", "*/src", "/app/src"]
 
 [tool.coverage.report]
+# 98, not 100. The handful of uncovered lines are defence in depth against
+# things a test cannot stage honestly: a concurrent insert winning a race, a
+# pycountry behaviour change, and second-layer guards that the transform stage
+# already prevents from being reached. Writing tests that fake those would
+# assert the mock, not the code.
+fail_under = 98
 exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "@overload"]

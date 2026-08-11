@@ -359,3 +359,54 @@ class TestJsonLd:
 
     def test_a_page_without_json_ld_yields_none(self) -> None:
         assert parse_json_ld("<html><body>nothing here</body></html>") is None
+
+
+class TestFinalEdgeCases:
+    @respx.mock
+    async def test_a_transport_failure_counts_towards_the_circuit(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # A connection reset is a failure like any other; not counting it would
+        # let a dead host be retried for every candidate in the run.
+        respx.get(AUTOCOMPLETE).mock(side_effect=httpx.ConnectError("refused"))
+
+        async with extractor.build_client() as client:
+            for _ in range(2):
+                with pytest.raises(GoodreadsUnavailableError, match="transport"):
+                    await extractor.autocomplete(client, "dune")
+
+        assert extractor.circuit_open
+
+    @respx.mock
+    async def test_an_ordinary_client_error_does_not_open_the_circuit(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # A 404 is about this request, not about our access to the site.
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(404))
+
+        async with extractor.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError):
+                await extractor.autocomplete(client, "dune")
+
+        assert not extractor.circuit_open
+
+    def test_the_instance_method_delegates_to_the_module_mapper(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        candidate = load("goodreads_autocomplete.json")[0]
+
+        assert extractor.to_raw_book(candidate) == map_payload(candidate)
+
+    def test_an_unparseable_aria_position_keeps_the_series_name(self) -> None:
+        parsed = parse_aria_series("Book 1.2.3 in the Discworld series")
+
+        assert parsed == ("Discworld", None)
+
+    def test_an_empty_json_ld_script_is_skipped(self) -> None:
+        html = """<script type="application/ld+json"></script>
+        <script type="application/ld+json">{"@type": "Book", "name": "Dune"}</script>"""
+
+        parsed = parse_json_ld(html)
+
+        assert parsed is not None
+        assert parsed["name"] == "Dune"

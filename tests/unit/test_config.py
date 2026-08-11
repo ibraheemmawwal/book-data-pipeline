@@ -195,3 +195,15 @@ class TestEnvironmentLoading:
         loaded = settings(googlebooks_api_key="super-secret-key")
 
         assert "super-secret-key" not in repr(loaded)
+
+
+class TestBlankSecrets:
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_a_blank_api_key_reads_as_absent(self, blank: str) -> None:
+        # PIPELINE_GOOGLEBOOKS_API_KEY= in an env file means "not configured".
+        # An empty string would read as present-but-invalid and turn a clean
+        # skip into a 400 from Google.
+        loaded = settings(googlebooks_api_key=blank)
+
+        assert loaded.googlebooks_api_key is None
+        assert SourceName.GOOGLEBOOKS not in loaded.active_sources()

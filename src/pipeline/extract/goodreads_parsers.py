@@ -139,12 +139,11 @@ def parse_series_from_title(dirty_title: str | None) -> ParsedSeries | None:
     position: Decimal | None = None
     if match.group(2):
         try:
+            # The capture group is digits and dots only, so a negative value
+            # cannot reach here; a bare "." or "1.2.3" still can.
             position = Decimal(match.group(2))
         except InvalidOperation:
             position = None
-        else:
-            if position < 0:
-                position = None
 
     bare = dirty_title[: match.start()].strip()
     if not bare:

@@ -6,6 +6,7 @@ distinguishably.
 """
 
 import json
+import re
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -180,3 +181,26 @@ class TestPartitionMarkerTopology:
         marker = PartitionMarker(run_id=RUN_ID, topic="books.clean", partition=17)
 
         assert marker.partition == 17
+
+
+class TestEnvelopeGuards:
+    def test_an_unsupported_schema_version_is_refused_at_the_boundary(self) -> None:
+        # Refusing here rather than deeper in decode means a future producer's
+        # event cannot be half-interpreted before anyone notices.
+        with pytest.raises(UnsupportedSchemaVersionError):
+            BookEvent(**event_kwargs(schema_version=99))  # type: ignore[arg-type]
+
+    def test_a_book_event_cannot_claim_to_be_a_marker(self) -> None:
+        with pytest.raises(
+            ValidationError, match=re.escape("cannot use the run.partition_complete")
+        ):
+            BookEvent(**event_kwargs(event_type=EventType.RUN_PARTITION_COMPLETE))  # type: ignore[arg-type]
+
+    def test_a_marker_cannot_claim_to_be_a_book_event(self) -> None:
+        with pytest.raises(ValidationError, match=re.escape("must use the run.partition_complete")):
+            PartitionMarker(
+                run_id=RUN_ID,
+                topic="books.raw",
+                partition=0,
+                event_type=EventType.BOOK_RAW,
+            )

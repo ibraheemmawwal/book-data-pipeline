@@ -189,3 +189,27 @@ class TestCoverUrls:
     def test_none_is_handled(self) -> None:
         assert upgrade_cover_url(None) is None
         assert is_placeholder_cover(None)
+
+
+class TestParserEdgeCases:
+    def test_an_unparseable_position_keeps_the_series(self) -> None:
+        # The relationship is real even when the number is nonsense; dropping
+        # the whole series over a bad position would lose more than it saves.
+        parsed = parse_series_from_title("Book (Discworld, #1.2.3)")
+
+        assert parsed is not None
+        assert parsed.name == "Discworld"
+        assert parsed.position is None
+
+    def test_a_title_that_is_only_a_series_suffix_is_refused(self) -> None:
+        # Nothing is left to be the book's own title.
+        assert parse_series_from_title("(Discworld, #1)") is None
+
+    def test_a_blank_series_name_is_refused(self) -> None:
+        assert parse_series_from_title("Book (   )") is None
+
+    def test_a_blank_candidate_title_scores_zero(self) -> None:
+        assert score_candidate("Dune", None, "", "Herbert") == 0.0
+
+    def test_html_with_only_markup_yields_none(self) -> None:
+        assert clean_html_text("<div><span></span></div>") is None

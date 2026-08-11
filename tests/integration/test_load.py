@@ -7,16 +7,26 @@ ordering, so it can only be proven here.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, Engine, select, text
+from sqlalchemy import Connection, Engine, insert, select, text, update
 
 from pipeline.extract import googlebooks, gutendex, openlibrary
-from pipeline.load import CatalogueLoader
+from pipeline.extract.base import Rejected
+from pipeline.load import CatalogueLoader, LoadResult, record_rejection
 from pipeline.models.db import authors as authors_table
-from pipeline.models.db import book_authors, book_sources, books
-from pipeline.models.domain import CleanBook, RawBook
+from pipeline.models.db import (
+    book_authors,
+    book_sources,
+    book_subjects,
+    books,
+    ingestion_runs,
+    rejected_records,
+    subjects,
+)
+from pipeline.models.domain import CleanBook, RawBook, SourceName
 from pipeline.transform import canonicalise
 
 pytestmark = pytest.mark.integration
@@ -390,3 +400,166 @@ class TestIsbnPromotionAndMerge:
         assert count(connection, books) == 1
         # One author, linked once, despite arriving from both sides.
         assert count(connection, book_authors) == 1
+
+
+class TestLoadResultAccounting:
+    def test_records_loaded_sums_the_three_outcomes(self) -> None:
+        result = LoadResult(books_inserted=2, books_updated=3, books_unchanged=5)
+
+        assert result.records_loaded == 10
+
+
+class TestSubjects:
+    def test_subjects_are_linked(self, engine: Engine, connection: Connection) -> None:
+        CatalogueLoader().load(
+            engine, [gutendex_payload("1", subjects=["Whaling", "Adventure stories"])]
+        )
+
+        assert count(connection, subjects) == 2
+        assert count(connection, book_subjects) == 2
+
+    def test_the_same_subject_across_books_is_one_row(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        CatalogueLoader().load(
+            engine,
+            [
+                gutendex_payload("1", title="One", subjects=["Whaling"]),
+                gutendex_payload("2", title="Two", subjects=["Whaling"]),
+            ],
+        )
+
+        assert count(connection, subjects) == 1
+
+    def test_reloading_does_not_duplicate_subject_links(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        loader = CatalogueLoader()
+        for _ in range(3):
+            loader.load(engine, [gutendex_payload("1", subjects=["Whaling"])])
+
+        assert count(connection, book_subjects) == 1
+
+
+class TestRejectionRecording:
+    def test_a_rejection_is_persisted_rather_than_dropped(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # A pipeline that silently discards bad rows is one nobody can trust.
+        run_id = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(insert(ingestion_runs).values(id=run_id, dag_run_id=f"cli:{run_id}"))
+            record_rejection(
+                conn,
+                run_id,
+                Rejected(
+                    source=SourceName.GUTENDEX,
+                    source_id="99",
+                    raw_payload={"id": 99},
+                    rejection_code="invalid_record",
+                    detail="title must not be blank",
+                ),
+            )
+
+        stored = connection.execute(
+            select(
+                rejected_records.c.source,
+                rejected_records.c.rejection_code,
+                rejected_records.c.stage,
+            )
+        ).one()
+
+        assert stored.source == "gutendex"
+        assert stored.rejection_code == "invalid_record"
+        assert stored.stage == "load"
+
+
+class TestRecomputeGuards:
+    def test_a_book_with_no_replayable_provenance_is_left_alone(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # A stored payload the mapper can no longer read must not blank the
+        # canonical row it belongs to.
+        CatalogueLoader().load(engine, [gutendex_payload("1", title="Moby Dick")])
+        with engine.begin() as conn:
+            conn.execute(update(book_sources).values(raw_payload={"garbage": True}))
+
+        CatalogueLoader().load(engine, [gutendex_payload("2", title="Other")])
+
+        titles = set(connection.execute(select(books.c.title)).scalars().all())
+        assert "Moby Dick" in titles
+
+
+class TestLoadEdgeCases:
+    def test_an_author_whose_name_normalises_away_is_not_linked(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        CatalogueLoader().load(
+            engine,
+            [gutendex_payload("1", authors=[{"name": "."}, {"name": "Melville, Herman"}])],
+        )
+
+        assert count(connection, authors_table) == 1
+
+    def test_a_subject_that_normalises_away_is_not_linked(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        CatalogueLoader().load(engine, [gutendex_payload("1", subjects=["   ", "Whaling"])])
+
+        assert count(connection, subjects) == 1
+
+    def test_reconciling_an_isbn_the_book_already_owns_is_a_no_op(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Redelivery of an unchanged record must not attempt a merge.
+        loader = CatalogueLoader()
+        shared = "9780553380163"
+        loader.load(engine, [googlebooks_payload("gb1", isbns=[shared])])
+        result = loader.load(engine, [googlebooks_payload("gb1", isbns=[shared])])
+
+        assert result.merges == 0
+        assert count(connection, books) == 1
+
+    def test_a_book_created_concurrently_is_adopted_not_duplicated(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Two workers can reach _find_or_create_book for the same identity; the
+        # loser must take the winner's row rather than fail the record.
+        record = gutendex_payload("1", title="Moby Dick")
+        with engine.begin() as conn:
+            conn.execute(
+                insert(books).values(
+                    identity_key=record.identity_key,
+                    title="Moby Dick",
+                    content_hash="",
+                )
+            )
+
+        CatalogueLoader().load(engine, [record])
+
+        assert count(connection, books) == 1
+        assert count(connection, book_sources) == 1
+
+
+class TestUnreplayableProvenance:
+    def test_a_source_row_that_no_longer_maps_is_skipped_not_fatal(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Provenance written by an older mapper version may not survive a
+        # contract change. Recompute must ignore that row and keep going,
+        # rather than failing every book it touches.
+        loader = CatalogueLoader()
+        loader.load(engine, [gutendex_payload("1", title="Moby Dick")])
+        with engine.begin() as conn:
+            conn.execute(
+                update(book_sources)
+                .where(book_sources.c.source_id == "1")
+                .values(raw_payload={"unrecognised": "shape"})
+            )
+
+        # A second source resolving to the same fallback identity forces a
+        # recompute that replays both rows.
+        loader.load(engine, [openlibrary_payload("/works/OL1W", title="Moby Dick")])
+
+        assert count(connection, books) == 1
+        assert connection.execute(select(books.c.title)).scalar_one() == "Moby Dick"
