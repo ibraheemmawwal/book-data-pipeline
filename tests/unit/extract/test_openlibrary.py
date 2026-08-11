@@ -91,6 +91,26 @@ class TestUsagePolicy:
         assert all(d == pytest.approx(1.0, abs=0.05) for d in slept)
 
     @respx.mock
+    async def test_rate_limit_applies_to_retry_attempts(self, settings: Settings) -> None:
+        slept: list[float] = []
+
+        async def record(delay: float) -> None:
+            slept.append(delay)
+
+        extractor = OpenLibraryExtractor(settings, base_delay=0.0, sleep=record)
+        route = respx.get(SEARCH).mock(
+            side_effect=[
+                httpx.Response(500),
+                httpx.Response(200, json=load_fixture("openlibrary_empty.json")),
+            ]
+        )
+
+        await collect(extractor)
+
+        assert route.call_count == 2
+        assert any(delay == pytest.approx(1.0, abs=0.05) for delay in slept)
+
+    @respx.mock
     async def test_never_exceeds_the_configured_record_budget(
         self, extractor: OpenLibraryExtractor
     ) -> None:
@@ -244,3 +264,20 @@ class TestPerItemIsolation:
 
         assert len([i for i in items if isinstance(i, RawBook)]) == 1
         assert len([i for i in items if isinstance(i, Rejected)]) == 1
+
+    @respx.mock
+    async def test_non_array_subject_is_rejected_without_losing_the_page(
+        self, extractor: OpenLibraryExtractor
+    ) -> None:
+        payload = {
+            "docs": [
+                {"key": "/works/BAD", "title": "Bad", "subject": 42},
+                {"key": "/works/GOOD", "title": "Good"},
+            ]
+        }
+        respx.get(SEARCH).mock(return_value=httpx.Response(200, json=payload))
+
+        items = await collect(extractor, limit=2)
+
+        assert len([item for item in items if isinstance(item, Rejected)]) == 1
+        assert len([item for item in items if isinstance(item, RawBook)]) == 1

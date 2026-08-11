@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from pipeline.models.domain import RawBook, SourceName
 
@@ -43,6 +43,7 @@ DEFAULT_BASE_DELAY_SECONDS = 1.0
 DEFAULT_MAX_DELAY_SECONDS = 30.0
 
 Sleep = Callable[[float], Awaitable[None]]
+BeforeAttempt = Callable[[], Awaitable[None]]
 
 
 class SourceUnavailableError(Exception):
@@ -57,6 +58,56 @@ class SourceUnavailableError(Exception):
         self.source = source
         self.status_code = status_code
         super().__init__(f"{source}: {message}")
+
+
+class InvalidSourceRecordError(ValueError):
+    """A provider returned JSON with an unexpected per-record shape."""
+
+
+def require_object(value: object, location: str) -> dict[str, Any]:
+    """Return a JSON object or raise a rejection-friendly shape error."""
+    if not isinstance(value, dict):
+        msg = f"{location} must be an object, got {type(value).__name__}"
+        raise InvalidSourceRecordError(msg)
+    return value
+
+
+def optional_list(document: dict[str, Any], field: str) -> list[Any]:
+    """Read an optional JSON array without treating strings as iterables."""
+    value = document.get(field)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        msg = f"{field} must be an array, got {type(value).__name__}"
+        raise InvalidSourceRecordError(msg)
+    return value
+
+
+def optional_object(document: dict[str, Any], field: str) -> dict[str, Any]:
+    """Read an optional JSON object."""
+    value = document.get(field)
+    if value is None:
+        return {}
+    return require_object(value, field)
+
+
+def string_list(document: dict[str, Any], field: str) -> list[str]:
+    """Read an optional array whose entries must all be strings."""
+    values = optional_list(document, field)
+    if any(not isinstance(value, str) for value in values):
+        msg = f"{field} must contain only strings"
+        raise InvalidSourceRecordError(msg)
+    return values
+
+
+def record_error_detail(error: InvalidSourceRecordError | ValidationError) -> str:
+    """Render a bounded rejection reason for storage and logs."""
+    if isinstance(error, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors()
+        )[:500]
+    return str(error)[:500]
 
 
 class ExtractionRequest(BaseModel):
@@ -85,7 +136,7 @@ class Rejected:
 
     source: SourceName
     source_id: str | None
-    raw_payload: dict[str, Any]
+    raw_payload: Any
     rejection_code: str
     detail: str | None
 
@@ -170,6 +221,7 @@ async def request_with_retries(  # noqa: PLR0913
     base_delay: float = DEFAULT_BASE_DELAY_SECONDS,
     max_delay: float = DEFAULT_MAX_DELAY_SECONDS,
     sleep: Sleep | None = None,
+    before_attempt: BeforeAttempt | None = None,
     source: str = "http",
 ) -> httpx.Response:
     """Issue a request, retrying only what can plausibly recover.
@@ -183,6 +235,8 @@ async def request_with_retries(  # noqa: PLR0913
     last_detail = "no attempt was made"
 
     for attempt in range(max_attempts):
+        if before_attempt is not None:
+            await before_attempt()
         try:
             response = await client.request(method, url, params=params)
         except httpx.TransportError as error:

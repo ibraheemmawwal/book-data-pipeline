@@ -227,12 +227,23 @@ class TestGutendexNativeFields:
         book = CleanBook(
             **clean_kwargs(  # type: ignore[arg-type]
                 download_count=46103,
-                authors=[RawAuthor(name="Homer", birth_year=-750, death_year=-650)],
+                authors=[
+                    RawAuthor(
+                        name="Homer",
+                        source_author_id="name:homer",
+                        birth_year=-750,
+                        death_year=-650,
+                    )
+                ],
             )
         )
 
         assert book.download_count == 46103
         assert book.authors[0].birth_year == -750
+
+    def test_clean_author_requires_a_source_identity(self) -> None:
+        with pytest.raises(ValidationError, match="source_author_id"):
+            CleanBook(**clean_kwargs(authors=[RawAuthor(name="Anonymous")]))  # type: ignore[arg-type]
 
 
 class TestLanguagesArePreserved:

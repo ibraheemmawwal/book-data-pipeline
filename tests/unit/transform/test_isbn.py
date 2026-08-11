@@ -69,12 +69,17 @@ class TestToIsbn13:
     def test_rejects_none(self) -> None:
         assert to_isbn13(None) is None
 
-    @pytest.mark.parametrize("prefix", ["979", "978"])
-    def test_accepts_both_registered_prefixes(self, prefix: str) -> None:
-        body = f"{prefix}047118651"
+    @pytest.mark.parametrize("body", ["978047118651", "979847118651"])
+    def test_accepts_registered_isbn_prefixes(self, body: str) -> None:
         candidate = body + str(isbn13_check_digit(body))
 
         assert to_isbn13(candidate) == candidate
+
+    def test_rejects_the_979_0_ismn_prefix(self) -> None:
+        body = "979047118651"
+        candidate = body + str(isbn13_check_digit(body))
+
+        assert to_isbn13(candidate) is None
 
     def test_rejects_a_thirteen_digit_number_with_an_unregistered_prefix(self) -> None:
         # Only 978 and 979 are ISBN prefixes; 977 is ISSN and 590 is nothing.

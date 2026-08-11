@@ -16,6 +16,7 @@ import re
 # music; accepting either would let a non-book identifier become a book's
 # identity.
 VALID_PREFIXES = ("978", "979")
+ISMN_PREFIX = "9790"
 
 # Above this many candidates the record is describing a work rather than an
 # edition. Open Library returned 4,725 ISBNs for one work in a live run, and
@@ -26,7 +27,7 @@ MAX_CANDIDATES_FOR_IDENTITY = 8
 
 _CHECK_DIGIT_X = 10
 
-_SEPARATORS = re.compile(r"[\s\-‐-―]")
+_SEPARATORS = re.compile(r"[\s\-\u2010-\u2015]")
 _ISBN10 = re.compile(r"^[0-9]{9}[0-9X]$")
 _ISBN13 = re.compile(r"^[0-9]{13}$")
 
@@ -56,6 +57,8 @@ def is_valid_isbn13(value: str) -> bool:
     if not _ISBN13.fullmatch(value):
         return False
     if not value.startswith(VALID_PREFIXES):
+        return False
+    if value.startswith(ISMN_PREFIX):
         return False
     return int(value[12]) == isbn13_check_digit(value[:12])
 

@@ -16,6 +16,7 @@ from pipeline.transform.normalise import (
     normalise_language,
     normalise_subject,
     normalise_title,
+    parse_author_year,
     parse_year,
     select_language,
 )
@@ -109,6 +110,19 @@ class TestParseYear:
     def test_never_raises_and_never_returns_an_illegal_year(self, value: str) -> None:
         year = parse_year(value)
         assert year is None or 1400 <= year <= 2100
+
+
+class TestParseAuthorYear:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(-750, -750), ("-750", -750), (" 1817 ", 1817), (2100, 2100)],
+    )
+    def test_preserves_signed_years(self, raw: int | str, expected: int) -> None:
+        assert parse_author_year(raw) == expected
+
+    @pytest.mark.parametrize("raw", [True, "unknown", "-5000", 3000, "", None])
+    def test_rejects_unusable_years(self, raw: int | str | None) -> None:
+        assert parse_author_year(raw) is None
 
 
 class TestNormaliseLanguage:

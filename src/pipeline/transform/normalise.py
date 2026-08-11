@@ -16,6 +16,8 @@ from functools import lru_cache
 
 import pycountry
 
+from pipeline.models.domain import AUTHOR_YEAR_MAX, AUTHOR_YEAR_MIN
+
 # Mirrors CHECK (published_year BETWEEN 1400 AND 2100). A value the database
 # would refuse must never reach it.
 ALPHA_3_LENGTH = 3
@@ -26,24 +28,25 @@ MAX_YEAR = 2100
 _WHITESPACE = re.compile(r"\s+")
 _FOUR_DIGIT_YEAR = re.compile(r"(?<!\d)(\d{4})(?!\d)")
 _ROMAN_NUMERAL = re.compile(r"(?<![A-Za-z])([MDCLXVImdclxvi]{2,})(?![A-Za-z])")
-_LIFE_DATES = re.compile(r",?\s*\d{3,4}\s*[-–—]\s*\d{0,4}\s*$")
+_LIFE_DATES = re.compile(r",?\s*\d{3,4}\s*[-\u2013\u2014]\s*\d{0,4}\s*$")
 _AUTHOR_PUNCTUATION = re.compile(r"[.,;:()\[\]]")
+_SIGNED_YEAR = re.compile(r"^[+-]?\d{1,4}$")
 
 # Typographic characters that carry no distinguishing meaning in a title.
 _PUNCTUATION_FOLD = str.maketrans(
     {
-        "‘": "'",
-        "’": "'",
-        "‚": "'",
-        "‛": "'",
-        "“": '"',
-        "”": '"',
-        "„": '"',
-        "–": "-",
-        "—": "-",
-        "‐": "-",
-        "‑": "-",
-        " ": " ",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u00a0": " ",
     }
 )
 
@@ -183,6 +186,22 @@ def parse_year(value: str | None) -> int | None:
         return year if MIN_YEAR <= year <= MAX_YEAR else None
 
     return None
+
+
+def parse_author_year(value: int | str | None) -> int | None:
+    """Validate a signed author year while retaining BCE values."""
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        year = value
+    else:
+        text = value.strip()
+        if not _SIGNED_YEAR.fullmatch(text):
+            return None
+        year = int(text)
+
+    return year if AUTHOR_YEAR_MIN <= year <= AUTHOR_YEAR_MAX else None
 
 
 @lru_cache(maxsize=2048)

@@ -26,10 +26,16 @@ from pipeline.extract.base import (
     DEFAULT_BASE_DELAY_SECONDS,
     ExtractedItem,
     ExtractionRequest,
+    InvalidSourceRecordError,
     Rejected,
     SourceUnavailableError,
     build_client,
+    optional_list,
+    optional_object,
+    record_error_detail,
     request_with_retries,
+    require_object,
+    string_list,
 )
 from pipeline.models.domain import RawAuthor, RawBook, SourceName
 
@@ -105,16 +111,29 @@ class GoogleBooksExtractor:
                     source=self.source_name.value,
                 )
                 try:
-                    body = response.json()
+                    body = require_object(response.json(), "response")
                 except json.JSONDecodeError as error:
                     raise SourceUnavailableError(
                         self.source_name.value,
                         f"response was not JSON: {error}",
                         status_code=response.status_code,
                     ) from error
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
 
                 # Google omits `items` entirely rather than sending an empty list.
-                items = body.get("items") or []
+                try:
+                    items = optional_list(body, "items")
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
                 if not items:
                     return
 
@@ -130,20 +149,26 @@ class GoogleBooksExtractor:
                 if len(items) < page_size:
                     return
 
-    def _to_item(self, volume: dict[str, Any]) -> ExtractedItem:
+    def _to_item(self, payload: object) -> ExtractedItem:
         """Map one volume; any failure becomes a rejection."""
-        volume_id = volume.get("id")
-        info = volume.get("volumeInfo") or {}
+        volume_id: object = None
         try:
+            volume = require_object(payload, "volume")
+            volume_id = volume.get("id")
+            info = optional_object(volume, "volumeInfo")
+            language = info.get("language")
+            if language is not None and not isinstance(language, str):
+                msg = f"language must be a string, got {type(language).__name__}"
+                raise InvalidSourceRecordError(msg)
             return RawBook(
                 source=self.source_name,
                 source_id=volume_id,  # type: ignore[arg-type]
                 title=info.get("title"),  # type: ignore[arg-type]
                 subtitle=info.get("subtitle"),
-                authors=[RawAuthor(name=n) for n in info.get("authors") or [] if n],
-                subjects=list(info.get("categories") or []),
+                authors=[RawAuthor(name=name) for name in string_list(info, "authors") if name],
+                subjects=string_list(info, "categories"),
                 isbns=_isbns(info),
-                languages=[info["language"]] if info.get("language") else [],
+                languages=[language] if language else [],
                 published=info.get("publishedDate"),
                 publisher=info.get("publisher"),
                 page_count=info.get("pageCount"),
@@ -151,20 +176,18 @@ class GoogleBooksExtractor:
                 cover_url=_cover(info),
                 raw_payload=volume,
             )
-        except ValidationError as error:
+        except (InvalidSourceRecordError, ValidationError) as error:
             logger.warning(
                 "googlebooks.record_rejected",
                 source_id=volume_id,
-                errors=error.error_count(),
+                errors=error.error_count() if isinstance(error, ValidationError) else 1,
             )
             return Rejected(
                 source=self.source_name,
                 source_id=str(volume_id) if volume_id is not None else None,
-                raw_payload=volume,
+                raw_payload=payload,
                 rejection_code="invalid_record",
-                detail="; ".join(
-                    f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in error.errors()
-                )[:500],
+                detail=record_error_detail(error),
             )
 
 
@@ -174,14 +197,27 @@ def _isbns(info: dict[str, Any]) -> list[str]:
     The array also carries OTHER and ISSN entries; treating those as ISBNs
     would poison canonical identity with values that are not book numbers.
     """
-    return [
-        identifier["identifier"]
-        for identifier in info.get("industryIdentifiers") or []
-        if identifier.get("type") in ISBN_IDENTIFIER_TYPES and identifier.get("identifier")
-    ]
+    values: list[str] = []
+    for item in optional_list(info, "industryIdentifiers"):
+        identifier = require_object(item, "industryIdentifiers item")
+        identifier_type = identifier.get("type")
+        value = identifier.get("identifier")
+        if identifier_type is not None and not isinstance(identifier_type, str):
+            msg = "industryIdentifiers type must be a string"
+            raise InvalidSourceRecordError(msg)
+        if identifier_type in ISBN_IDENTIFIER_TYPES:
+            if not isinstance(value, str) or not value:
+                msg = "ISBN industryIdentifiers entries require a string identifier"
+                raise InvalidSourceRecordError(msg)
+            values.append(value)
+    return values
 
 
 def _cover(info: dict[str, Any]) -> str | None:
     """The largest cover Google offers in a search response."""
-    links = info.get("imageLinks") or {}
-    return links.get("thumbnail") or links.get("smallThumbnail")
+    links = optional_object(info, "imageLinks")
+    value = links.get("thumbnail") or links.get("smallThumbnail")
+    if value is not None and not isinstance(value, str):
+        msg = f"imageLinks value must be a string, got {type(value).__name__}"
+        raise InvalidSourceRecordError(msg)
+    return value

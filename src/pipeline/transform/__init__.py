@@ -20,6 +20,7 @@ from pipeline.transform.normalise import (
     normalise_language,
     normalise_subject,
     normalise_title,
+    parse_author_year,
     parse_year,
     select_language,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "normalise_language",
     "normalise_subject",
     "normalise_title",
+    "parse_author_year",
     "parse_year",
     "payload_hash",
     "select_canonical_isbn",

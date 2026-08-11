@@ -87,7 +87,7 @@ class TestBookEvent:
 
 class TestPartitionMarker:
     def test_carries_only_boundary_metadata(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=2, partition_count=3)
+        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=2)
 
         assert marker.event_type is EventType.RUN_PARTITION_COMPLETE
         assert marker.schema_version == SCHEMA_VERSION
@@ -95,13 +95,14 @@ class TestPartitionMarker:
         # extractor retries and DLQ routing make counts differ by design.
         assert not hasattr(marker, "record_count")
         assert not hasattr(marker, "expected_count")
+        assert not hasattr(marker, "partition_count")
 
     def test_negative_partition_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="partition"):
-            PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=-1, partition_count=3)
+            PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=-1)
 
     def test_round_trips_through_json(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.clean", partition=0, partition_count=3)
+        marker = PartitionMarker(run_id=RUN_ID, topic="books.clean", partition=0)
 
         assert decode_event(marker.to_json()) == marker
 
@@ -109,7 +110,7 @@ class TestPartitionMarker:
 class TestDecodeEvent:
     def test_dispatches_on_event_type(self) -> None:
         raw = BookEvent(**event_kwargs())  # type: ignore[arg-type]
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=1, partition_count=3)
+        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=1)
 
         assert isinstance(decode_event(raw.to_json()), BookEvent)
         assert isinstance(decode_event(marker.to_json()), PartitionMarker)
@@ -150,54 +151,32 @@ class TestDecodeEvent:
         with pytest.raises(ValueError, match="event_type"):
             decode_event(json.dumps(payload).encode())
 
+    def test_boolean_schema_version_is_not_version_one(self) -> None:
+        payload = BookEvent(**event_kwargs()).model_dump(mode="json")  # type: ignore[arg-type]
+        payload["schema_version"] = True
+
+        with pytest.raises(UnsupportedSchemaVersionError):
+            decode_event(json.dumps(payload).encode())
+
 
 class TestPartitionMarkerTopology:
-    """A marker carries the partition count it was written against.
+    """Broker topology is frozen in the database, never trusted from an event."""
 
-    Completion is decided by comparing durably recorded markers against this
-    number. Re-reading broker metadata instead would let a topic resized
-    between runs either stall a run forever or finalise it early, so the count
-    travels with the marker.
-    """
-
-    def test_partition_count_is_required(self) -> None:
+    def test_event_supplied_partition_count_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="partition_count"):
-            PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=0)  # type: ignore[call-arg]
-
-    def test_carries_the_topology_it_was_written_against(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=2, partition_count=3)
-
-        assert marker.partition == 2
-        assert marker.partition_count == 3
-
-    @pytest.mark.parametrize("count", [0, -1])
-    def test_non_positive_partition_count_is_rejected(self, count: int) -> None:
-        with pytest.raises(ValidationError, match="partition_count"):
-            PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=0, partition_count=count)
-
-    @pytest.mark.parametrize(("partition", "count"), [(3, 3), (5, 3)])
-    def test_partition_outside_the_declared_topology_is_rejected(
-        self, partition: int, count: int
-    ) -> None:
-        # Partition 3 of a three-partition topic does not exist. Accepting it
-        # would record an observation that can never be completed.
-        with pytest.raises(ValidationError, match="partition"):
             PartitionMarker(
-                run_id=RUN_ID, topic="books.raw", partition=partition, partition_count=count
+                run_id=RUN_ID,
+                topic="books.raw",
+                partition=0,
+                partition_count=3,  # type: ignore[call-arg]
             )
 
-    def test_single_partition_topic_is_valid(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.dlq", partition=0, partition_count=1)
+    @pytest.mark.parametrize("topic", ["books.dlq", "books.unknown", ""])
+    def test_only_data_topics_can_have_completion_markers(self, topic: str) -> None:
+        with pytest.raises(ValidationError, match="topic"):
+            PartitionMarker(run_id=RUN_ID, topic=topic, partition=0)
 
-        assert marker.partition_count == 1
+    def test_live_partition_bounds_belong_to_the_durable_consumer_check(self) -> None:
+        marker = PartitionMarker(run_id=RUN_ID, topic="books.clean", partition=17)
 
-    def test_partition_count_survives_a_json_round_trip(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.clean", partition=1, partition_count=3)
-
-        assert decode_event(marker.to_json()) == marker
-
-    def test_is_still_not_a_record_count_message(self) -> None:
-        marker = PartitionMarker(run_id=RUN_ID, topic="books.raw", partition=0, partition_count=3)
-
-        assert not hasattr(marker, "record_count")
-        assert not hasattr(marker, "expected_count")
+        assert marker.partition == 17

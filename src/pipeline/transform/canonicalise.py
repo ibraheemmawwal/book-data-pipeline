@@ -14,11 +14,14 @@ that depended on input order would rewrite rows that had not changed.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
+
+from pydantic import ValidationError
 
 from pipeline.extract.base import Rejected
 from pipeline.models.domain import CleanBook, RawBook, SourceName
-from pipeline.transform.identity import identity_key
+from pipeline.transform.identity import ISBN_PREFIX, identity_key
 from pipeline.transform.isbn import select_canonical_isbn
 from pipeline.transform.normalise import (
     normalise_author,
@@ -43,7 +46,6 @@ _MERGEABLE_FIELDS = (
     "title",
     "normalised_title",
     "subtitle",
-    "isbn13",
     "published_year",
     "page_count",
     "language",
@@ -85,32 +87,56 @@ def canonicalise(record: RawBook) -> CleanBook | Rejected:
     isbn13 = select_canonical_isbn(record.isbns)
     published_year = parse_year(record.published)
 
-    return CleanBook(
-        source=record.source,
-        source_id=record.source_id,
-        identity_key=identity_key(
+    authors = []
+    for author in record.authors:
+        normalised_name = normalise_author(author.name)
+        if normalised_name is None:
+            continue
+        source_author_id = author.source_author_id or (
+            "name:" + hashlib.sha256(normalised_name.encode("utf-8")).hexdigest()
+        )
+        authors.append(author.model_copy(update={"source_author_id": source_author_id}))
+
+    try:
+        return CleanBook(
+            source=record.source,
+            source_id=record.source_id,
+            identity_key=identity_key(
+                isbn13=isbn13,
+                title=normalised_title,
+                first_author=first_author,
+                year=published_year,
+            ),
+            title=record.title,
+            normalised_title=normalised_title,
+            subtitle=record.subtitle,
             isbn13=isbn13,
-            title=normalised_title,
-            first_author=first_author,
-            year=published_year,
-        ),
-        title=record.title,
-        normalised_title=normalised_title,
-        subtitle=record.subtitle,
-        isbn13=isbn13,
-        published_year=published_year,
-        page_count=record.page_count,
-        language=select_language(record.languages),
-        publisher=record.publisher,
-        description=record.description,
-        cover_url=record.cover_url,
-        download_count=record.download_count,
-        authors=list(record.authors),
-        normalised_first_author=first_author,
-        subjects=[subject for subject in record.subjects if normalise_subject(subject) is not None],
-        source_updated=record.source_updated,
-        raw_payload=record.raw_payload,
-    )
+            published_year=published_year,
+            page_count=record.page_count,
+            language=select_language(record.languages),
+            publisher=record.publisher,
+            description=record.description,
+            cover_url=record.cover_url,
+            download_count=record.download_count,
+            authors=authors,
+            normalised_first_author=first_author,
+            subjects=[
+                subject for subject in record.subjects if normalise_subject(subject) is not None
+            ],
+            source_updated=record.source_updated,
+            raw_payload=record.raw_payload,
+        )
+    except ValidationError as error:
+        return Rejected(
+            source=record.source,
+            source_id=record.source_id,
+            raw_payload=record.raw_payload,
+            rejection_code="invalid_record",
+            detail="; ".join(
+                f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+                for item in error.errors()
+            )[:500],
+        )
 
 
 def _completeness(book: CleanBook) -> int:
@@ -128,7 +154,9 @@ def _rank(book: CleanBook) -> tuple[int, int, str]:
     return (-_completeness(book), SOURCE_PRIORITY[book.source], book.source_id)
 
 
-def merge_candidates(candidates: list[CleanBook]) -> CleanBook:
+def merge_candidates(
+    candidates: list[CleanBook], *, target_identity_key: str | None = None
+) -> CleanBook:
     """Resolve several records for one book into the canonical version.
 
     Field by field, the first candidate in rank order that has a non-null value
@@ -141,19 +169,47 @@ def merge_candidates(candidates: list[CleanBook]) -> CleanBook:
     all, so "newer" is not comparable across sources and would make the result
     depend on which provider happened to touch a record last.
 
+    One ISBN-bearing candidate promotes fallback candidates to that ISBN. The
+    optional ``target_identity_key`` is the canonical row already retained by
+    ingestion identity; it lets an existing fallback survive ordinary metadata
+    changes while still yielding to a newly discovered ISBN.
+
     Raises:
-        ValueError: the list is empty, or the candidates do not share one
-            canonical identity — merging across identities would fuse two
-            different books into a row nothing could separate again.
+        ValueError: the list is empty, contains conflicting ISBNs, or contains
+            unrelated fallback identities without an authoritative target.
     """
     if not candidates:
         msg = "merge_candidates requires at least one candidate"
         raise ValueError(msg)
 
-    identities = {book.identity_key for book in candidates}
-    if len(identities) > 1:
-        msg = f"candidates span {len(identities)} identity keys: {sorted(identities)}"
+    isbn_values = {book.isbn13 for book in candidates if book.isbn13 is not None}
+    if len(isbn_values) > 1:
+        msg = f"candidates contain conflicting ISBN identities: {sorted(isbn_values)}"
         raise ValueError(msg)
+
+    candidate_isbn = next(iter(isbn_values), None)
+    target_isbn = (
+        target_identity_key.removeprefix(ISBN_PREFIX)
+        if target_identity_key is not None and target_identity_key.startswith(ISBN_PREFIX)
+        else None
+    )
+    if candidate_isbn is not None and target_isbn is not None and candidate_isbn != target_isbn:
+        msg = (
+            f"candidate ISBN {candidate_isbn} conflicts with target identity {target_identity_key}"
+        )
+        raise ValueError(msg)
+
+    final_isbn = candidate_isbn or target_isbn
+    if final_isbn is not None:
+        final_identity_key = f"{ISBN_PREFIX}{final_isbn}"
+    elif target_identity_key is not None:
+        final_identity_key = target_identity_key
+    else:
+        identities = {book.identity_key for book in candidates}
+        if len(identities) > 1:
+            msg = f"candidates span {len(identities)} fallback identity keys: {sorted(identities)}"
+            raise ValueError(msg)
+        final_identity_key = next(iter(identities))
 
     ordered = sorted(candidates, key=_rank)
     winner = ordered[0]
@@ -172,9 +228,12 @@ def merge_candidates(candidates: list[CleanBook]) -> CleanBook:
     richest_authors = next((b for b in ordered if b.authors), winner)
     richest_subjects = next((b for b in ordered if b.subjects), winner)
 
-    return winner.model_copy(
-        update={
+    return CleanBook.model_validate(
+        {
+            **winner.model_dump(),
             **resolved,
+            "identity_key": final_identity_key,
+            "isbn13": final_isbn,
             "authors": list(richest_authors.authors),
             "subjects": list(richest_subjects.subjects),
         }

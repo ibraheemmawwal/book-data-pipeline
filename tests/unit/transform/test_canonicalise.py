@@ -118,6 +118,22 @@ class TestCanonicalise:
         book = clean(authors=[RawAuthor(name="Homer", birth_year=-750, death_year=-650)])
 
         assert book.authors[0].birth_year == -750
+        assert book.authors[0].source_author_id is not None
+        assert book.authors[0].source_author_id.startswith("name:")
+
+    def test_name_author_identity_is_stable_across_source_spelling(self) -> None:
+        surname_first = clean(authors=[RawAuthor(name="Melville, Herman")])
+        natural_order = clean(authors=[RawAuthor(name="Herman Melville")])
+
+        assert surname_first.authors[0].source_author_id == (
+            natural_order.authors[0].source_author_id
+        )
+
+    def test_invalid_numeric_metadata_becomes_a_rejection(self) -> None:
+        result = canonicalise(raw(page_count=-1))
+
+        assert isinstance(result, Rejected)
+        assert "page_count" in (result.detail or "")
 
     def test_provenance_survives(self) -> None:
         book = clean(SourceName.OPENLIBRARY, source_id="/works/OL1W")
@@ -228,15 +244,28 @@ class TestMergePrecedence:
         assert merged.publisher == "Penguin"
 
     def test_an_isbn_from_any_candidate_is_kept(self) -> None:
-        with_isbn = candidate(SourceName.GOOGLEBOOKS)
-        # Same identity, but this record never carried the ISBN itself.
-        without = candidate(SourceName.OPENLIBRARY, publisher="Penguin").model_copy(
-            update={"isbn13": None}
-        )
+        with_isbn = clean(SourceName.GOOGLEBOOKS, isbns=[SHARED_ISBN])
+        without = clean(SourceName.OPENLIBRARY, publisher="Penguin")
 
         merged = merge_candidates([without, with_isbn])
 
         assert merged.isbn13 == "9780553380163"
+        assert merged.identity_key == "isbn:9780553380163"
+
+    def test_existing_fallback_identity_can_survive_a_metadata_change(self) -> None:
+        existing = clean(SourceName.GUTENDEX, title="Moby Dick")
+        changed = clean(SourceName.GUTENDEX, title="Moby-Dick", source_id="updated")
+
+        merged = merge_candidates([existing, changed], target_identity_key=existing.identity_key)
+
+        assert merged.identity_key == existing.identity_key
+
+    def test_conflicting_isbns_are_refused(self) -> None:
+        first = clean(SourceName.OPENLIBRARY, isbns=["9780553380163"])
+        second = clean(SourceName.GOOGLEBOOKS, isbns=["9780306406157"])
+
+        with pytest.raises(ValueError, match="conflicting ISBN"):
+            merge_candidates([first, second])
 
     def test_authors_and_subjects_are_taken_from_the_winning_record(self) -> None:
         rich = candidate(

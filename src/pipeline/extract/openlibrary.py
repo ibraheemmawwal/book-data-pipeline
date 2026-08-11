@@ -25,12 +25,17 @@ from pipeline.extract.base import (
     DEFAULT_BASE_DELAY_SECONDS,
     ExtractedItem,
     ExtractionRequest,
+    InvalidSourceRecordError,
     Rejected,
     Sleep,
     SourceUnavailableError,
     TokenBucket,
     build_client,
+    optional_list,
+    record_error_detail,
     request_with_retries,
+    require_object,
+    string_list,
 )
 from pipeline.models.domain import RawAuthor, RawBook, SourceName
 
@@ -81,9 +86,6 @@ class OpenLibraryExtractor:
         ) as client:
             while emitted < request.max_records:
                 page_size = min(self._page_size, request.max_records - emitted)
-                # The limiter guards the source, so it is acquired before the
-                # request rather than slept after it.
-                await self._bucket.acquire()
                 response = await request_with_retries(
                     client,
                     "GET",
@@ -97,18 +99,32 @@ class OpenLibraryExtractor:
                     max_attempts=self._settings.http_max_attempts,
                     base_delay=self._base_delay,
                     sleep=self._sleep,
+                    before_attempt=self._bucket.acquire,
                     source=self.source_name.value,
                 )
                 try:
-                    body = response.json()
+                    body = require_object(response.json(), "response")
                 except json.JSONDecodeError as error:
                     raise SourceUnavailableError(
                         self.source_name.value,
                         f"response was not JSON: {error}",
                         status_code=response.status_code,
                     ) from error
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
 
-                docs = body.get("docs") or []
+                try:
+                    docs = optional_list(body, "docs")
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
                 if not docs:
                     return
 
@@ -125,37 +141,45 @@ class OpenLibraryExtractor:
 
                 page += 1
 
-    def _to_item(self, doc: dict[str, Any]) -> ExtractedItem:
+    def _to_item(self, payload: object) -> ExtractedItem:
         """Map one search document; any failure becomes a rejection."""
-        key = doc.get("key")
+        key: object = None
         try:
+            doc = require_object(payload, "document")
+            key = doc.get("key")
+            cover_id = doc.get("cover_i")
+            if cover_id is not None and (
+                isinstance(cover_id, bool) or not isinstance(cover_id, int)
+            ):
+                msg = f"cover_i must be an integer, got {type(cover_id).__name__}"
+                raise InvalidSourceRecordError(msg)
             return RawBook(
                 source=self.source_name,
                 source_id=key,  # type: ignore[arg-type]
                 title=doc.get("title"),  # type: ignore[arg-type]
                 subtitle=doc.get("subtitle"),
                 authors=_to_authors(doc),
-                subjects=list(doc.get("subject") or [])[:50],
-                isbns=list(doc.get("isbn") or []),
-                languages=list(doc.get("language") or []),
+                subjects=string_list(doc, "subject")[:50],
+                isbns=string_list(doc, "isbn"),
+                languages=string_list(doc, "language"),
                 published=_year_as_text(doc.get("first_publish_year")),
-                publisher=_first(doc.get("publisher")),
+                publisher=_first_non_empty(string_list(doc, "publisher")),
                 page_count=doc.get("number_of_pages_median"),
-                cover_url=(
-                    COVER_URL.format(cover_id=doc["cover_i"]) if doc.get("cover_i") else None
-                ),
+                cover_url=COVER_URL.format(cover_id=cover_id) if cover_id else None,
                 raw_payload=doc,
             )
-        except ValidationError as error:
-            logger.warning("openlibrary.record_rejected", source_id=key, errors=error.error_count())
+        except (InvalidSourceRecordError, ValidationError) as error:
+            logger.warning(
+                "openlibrary.record_rejected",
+                source_id=key,
+                errors=error.error_count() if isinstance(error, ValidationError) else 1,
+            )
             return Rejected(
                 source=self.source_name,
                 source_id=str(key) if key is not None else None,
-                raw_payload=doc,
+                raw_payload=payload,
                 rejection_code="invalid_record",
-                detail="; ".join(
-                    f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in error.errors()
-                )[:500],
+                detail=record_error_detail(error),
             )
 
 
@@ -167,21 +191,26 @@ def _to_authors(doc: dict[str, Any]) -> list[RawAuthor]:
     longer array wins and missing keys become None rather than shifting
     everything by one.
     """
-    names = doc.get("author_name") or []
-    keys = doc.get("author_key") or []
+    names = string_list(doc, "author_name")
+    keys = string_list(doc, "author_key")
     return [
         RawAuthor(name=name, source_author_id=key) for name, key in zip_longest(names, keys) if name
     ]
 
 
-def _first(values: list[str] | None) -> str | None:
-    return values[0] if values else None
+def _first_non_empty(values: list[str]) -> str | None:
+    return next((value for value in values if value.strip()), None)
 
 
-def _year_as_text(year: int | None) -> str | None:
+def _year_as_text(year: object) -> str | None:
     """Keep the year as the string transform expects.
 
     Parsing lives in transform, which already handles ``c1997`` and friends;
     doing it here would split year handling across two layers.
     """
-    return str(year) if year is not None else None
+    if year is None:
+        return None
+    if isinstance(year, bool) or not isinstance(year, (int, str)):
+        msg = f"first_publish_year must be an integer or string, got {type(year).__name__}"
+        raise InvalidSourceRecordError(msg)
+    return str(year)

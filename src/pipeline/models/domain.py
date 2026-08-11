@@ -85,7 +85,7 @@ class RawAuthor(_Frozen):
     """
 
     name: NonBlankStr
-    source_author_id: str | None = None
+    source_author_id: NonBlankStr | None = None
 
     # Gutendex publishes these for nearly every author. They are the catalogue's
     # densest calendar dimension, because Gutendex carries no publication year.
@@ -208,6 +208,13 @@ class CleanBook(_Frozen):
             msg = (
                 f"identity_key {self.identity_key!r} is a fallback key but "
                 f"isbn13 {self.isbn13!r} is present; an ISBN must use an isbn: key"
+            )
+            raise ValueError(msg)
+
+        missing_author_ids = [author.name for author in self.authors if not author.source_author_id]
+        if missing_author_ids:
+            msg = "every clean author requires a source_author_id; missing for: " + ", ".join(
+                missing_author_ids
             )
             raise ValueError(msg)
         return self

@@ -225,6 +225,23 @@ class TestPerItemIsolation:
 
         assert await collect(extractor) == []
 
+    @respx.mock
+    async def test_invalid_volume_info_is_rejected_without_losing_the_page(
+        self, extractor: GoogleBooksExtractor
+    ) -> None:
+        payload = {
+            "items": [
+                {"id": "bad", "volumeInfo": "not-an-object"},
+                {"id": "good", "volumeInfo": {"title": "Good"}},
+            ]
+        }
+        respx.get(VOLUMES).mock(return_value=httpx.Response(200, json=payload))
+
+        items = await collect(extractor, limit=2)
+
+        assert len([item for item in items if isinstance(item, Rejected)]) == 1
+        assert len([item for item in items if isinstance(item, RawBook)]) == 1
+
 
 class TestQuota:
     @respx.mock
