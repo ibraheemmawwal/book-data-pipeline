@@ -123,6 +123,11 @@ class TransformConsumer:
             else:
                 self._handle_book(event, result)
 
+            # After the effect, never before. A crash between the two replays
+            # the record, which the idempotent load makes harmless; committing
+            # first would lose it with nothing to show for it.
+            self._source.commit()
+
         return result
 
     def _handle_book(self, event: BookEvent, stats: TransformStats) -> None:

@@ -49,8 +49,18 @@ def _parse() -> object:
 
 @pytest.fixture(scope="session")
 def dagbag() -> object:
-    """The phase 1 graph, which is what a default clone runs."""
-    return _parse()
+    """The phase 1 graph, which is what a default clone runs.
+
+    The flag is cleared explicitly rather than assumed absent: a developer with
+    PIPELINE_KAFKA_ENABLED exported would otherwise get the phase 2 graph here
+    and watch the phase 1 assertions fail for no visible reason.
+    """
+    previous = os.environ.pop("PIPELINE_KAFKA_ENABLED", None)
+    try:
+        return _parse()
+    finally:
+        if previous is not None:
+            os.environ["PIPELINE_KAFKA_ENABLED"] = previous
 
 
 @pytest.fixture

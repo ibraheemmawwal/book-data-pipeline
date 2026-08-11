@@ -33,6 +33,16 @@ class Source(Protocol[T_co]):
         """Yield events until exhausted, or forever."""
         ...
 
+    def commit(self) -> None:
+        """Record that everything yielded so far has been dealt with.
+
+        Part of the protocol rather than a Kafka detail, because the *timing*
+        is a stage's decision: a consumer commits after its downstream effect
+        has landed, and only the consumer knows when that is. A source with no
+        position to remember implements this as a no-op.
+        """
+        ...
+
 
 @runtime_checkable
 class Sink(Protocol[T_contra]):

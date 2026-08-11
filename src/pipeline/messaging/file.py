@@ -59,6 +59,13 @@ class FileSource:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
 
+    def commit(self) -> None:
+        """No-op: a file has no consumer position to remember.
+
+        Present so a stage can call it unconditionally and stay ignorant of
+        which transport it is reading from.
+        """
+
     def consume(self) -> Iterator[Event]:
         """Yield every event in the file, then stop.
 

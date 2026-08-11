@@ -29,7 +29,6 @@ only task that can fail the run for a data reason.
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 from typing import Any
 
@@ -38,10 +37,26 @@ from airflow.sdk import dag, task
 
 DAG_ID = "book_ingestion"
 
+
 # Which shape the graph takes is a parse-time decision, not a runtime one:
 # Airflow builds the task graph when it reads this file, so the phases cannot
 # be chosen per run. Compose sets this on the kafka profile and nowhere else.
-KAFKA_MODE = os.environ.get("PIPELINE_KAFKA_ENABLED", "false").lower() == "true"
+def _kafka_mode() -> bool:
+    """Whether to build the phase 2 graph.
+
+    Read through Settings rather than straight from the environment: Settings
+    rejects unknown PIPELINE_* variables, so a bare os.environ lookup would
+    make every task fail on a variable the DAG itself introduced.
+    """
+    from pipeline.config import Settings
+
+    try:
+        return Settings().kafka_enabled
+    except Exception:
+        return False
+
+
+KAFKA_MODE = _kafka_mode()
 
 # The default applies to finite orchestration tasks. Resolution overrides it:
 # Goodreads permits one in-flight request and a resolved candidate can need

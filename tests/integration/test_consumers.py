@@ -382,3 +382,78 @@ class TestDeadLetterPaths:
         stats = LoadConsumer(engine, FileSource(clean_path), FileSink(tmp_path / "d.jsonl")).run()
 
         assert stats.runs_finalised == 0
+
+
+class TestOffsetCommits:
+    """The commit the whole at-least-once story depends on.
+
+    A consumer that processes without committing loses nothing, so every test
+    of correctness still passes — and then replays the entire topic on every
+    restart. A live run found exactly that: both groups had processed
+    everything and committed nothing.
+    """
+
+    class CountingSource:
+        """A finite source that records when the stage committed."""
+
+        def __init__(self, events: list[Any]) -> None:
+            self._events = events
+            self.commits = 0
+
+        def consume(self) -> Any:
+            yield from self._events
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    def test_the_load_consumer_commits_after_each_event(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        source = self.CountingSource([clean_event(run_id, "1"), clean_event(run_id, "2")])
+
+        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl")).run()
+
+        assert source.commits == 2
+
+    def test_the_transform_consumer_commits_after_each_event(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        source = self.CountingSource([raw_event(run_id, "1"), raw_event(run_id, "2")])
+
+        TransformConsumer(
+            engine,
+            source,
+            FileSink(tmp_path / "c.jsonl"),
+            FileSink(tmp_path / "d.jsonl"),
+            clean_partitions=PARTITIONS,
+        ).run()
+
+        assert source.commits == 2
+
+    def test_markers_are_committed_too(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        # An uncommitted marker would be re-observed on every restart, which
+        # the primary key absorbs — but the topic would never drain.
+        source = self.CountingSource(markers(run_id, "books.clean"))
+
+        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl")).run()
+
+        assert source.commits == PARTITIONS
+
+    def test_a_parked_record_is_still_committed(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        # It reached the DLQ, so it has been dealt with. Not committing would
+        # park it again on every restart, forever.
+        source = self.CountingSource([raw_event(run_id, "1", title="")])
+
+        TransformConsumer(
+            engine,
+            source,
+            FileSink(tmp_path / "c.jsonl"),
+            FileSink(tmp_path / "d.jsonl"),
+            clean_partitions=PARTITIONS,
+        ).run()
+
+        assert source.commits == 1
