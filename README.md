@@ -4,9 +4,10 @@ An ETL pipeline that ingests book metadata from documented public APIs, validate
 normalises source records, preserves source provenance, resolves them into canonical
 books, and loads a PostgreSQL catalogue designed for search and analytics.
 
-> **Status: in development.** Milestone 1 of 9 — project scaffold, configuration and
-> domain/event models. Nothing ingests data yet. Releases are tagged `v0.1` (core ETL),
-> `v1.0` (Airflow 3) and `v2.0` (Kafka). This README is expanded at each release.
+> **Status: in development.** Milestone 3 of 9 — all three extractors and the pure
+> transform/identity layer are implemented. The PostgreSQL load and CLI ingest command
+> land in milestone 4. Releases are tagged `v0.1` (core ETL), `v1.0` (Airflow 3) and
+> `v2.0` (Kafka). This README is expanded at each release.
 
 ## Design outline
 

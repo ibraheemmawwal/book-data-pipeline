@@ -68,7 +68,27 @@ class TestMapping:
         assert len(books[0].description) > 50
 
     @respx.mock
-    async def test_language_is_left_untranslated_for_transform(
+    async def test_first_non_blank_summary_becomes_description(
+        self, extractor: GutendexExtractor
+    ) -> None:
+        payload = {
+            "results": [
+                {
+                    "id": 1,
+                    "title": "A book",
+                    "summaries": ["", "  ", "Useful summary"],
+                }
+            ],
+            "next": None,
+        }
+        respx.get(BOOKS).mock(return_value=httpx.Response(200, json=payload))
+
+        books = [book for book in await collect(extractor) if isinstance(book, RawBook)]
+
+        assert books[0].description == "Useful summary"
+
+    @respx.mock
+    async def test_languages_are_left_untranslated_for_transform(
         self, extractor: GutendexExtractor
     ) -> None:
         # Gutendex speaks ISO 639-1 ("en"); mapping to 639-3 is transform's job
@@ -80,7 +100,7 @@ class TestMapping:
 
         books = [b for b in await collect(extractor) if isinstance(b, RawBook)]
 
-        assert books[0].language == "en"
+        assert books[0].languages == ["en"]
 
     @respx.mock
     async def test_cover_url_comes_from_the_jpeg_format(self, extractor: GutendexExtractor) -> None:
@@ -210,6 +230,37 @@ class TestPerItemIsolation:
         rejects = [i for i in await collect(extractor) if isinstance(i, Rejected)]
 
         assert any(r.source_id is None for r in rejects)
+
+    @respx.mock
+    async def test_structurally_invalid_item_is_rejected_without_losing_the_page(
+        self, extractor: GutendexExtractor
+    ) -> None:
+        payload = {
+            "results": [
+                {"id": 1, "title": "Bad", "authors": "not-an-array"},
+                {"id": 2, "title": "Good"},
+            ],
+            "next": None,
+        }
+        respx.get(BOOKS).mock(return_value=httpx.Response(200, json=payload))
+
+        items = await collect(extractor)
+
+        assert len([item for item in items if isinstance(item, Rejected)]) == 1
+        assert len([item for item in items if isinstance(item, RawBook)]) == 1
+
+    @respx.mock
+    async def test_non_object_item_is_preserved_as_a_rejection(
+        self, extractor: GutendexExtractor
+    ) -> None:
+        respx.get(BOOKS).mock(
+            return_value=httpx.Response(200, json={"results": ["bad"], "next": None})
+        )
+
+        items = await collect(extractor)
+
+        assert isinstance(items[0], Rejected)
+        assert items[0].raw_payload == "bad"
 
 
 class TestFailure:

@@ -80,6 +80,13 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # Assertions and magic values are the point of a test suite.
 "tests/**" = ["PLR2004", "ARG001"]
+# These modules exist to fold ambiguous Unicode punctuation into its plain
+# equivalents, so the "ambiguous character" they are flagged for is the input
+# they are written to handle. Silencing it here rather than project-wide keeps
+# the check live everywhere it could still catch a real typo.
+"src/pipeline/transform/normalise.py" = ["RUF001"]
+"src/pipeline/transform/isbn.py" = ["RUF001"]
+"tests/unit/transform/test_normalise.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"

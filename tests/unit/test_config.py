@@ -76,6 +76,14 @@ class TestValidation:
                 openlibrary_enabled=True,
             )
 
+    def test_whitespace_openlibrary_contact_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="openlibrary_contact_email"):
+            Settings(  # type: ignore[call-arg]
+                database_url="postgresql+psycopg://u:p@localhost:5432/catalogue",
+                openlibrary_enabled=True,
+                openlibrary_contact_email="   ",
+            )
+
     def test_disabled_openlibrary_does_not_require_a_contact_email(self) -> None:
         loaded = Settings(  # type: ignore[call-arg]
             database_url="postgresql+psycopg://u:p@localhost:5432/catalogue",
@@ -130,6 +138,15 @@ class TestActiveSources:
     def test_at_least_one_source_must_be_active(self) -> None:
         with pytest.raises(ValidationError):
             settings(gutendex_enabled=False, openlibrary_enabled=False, googlebooks_enabled=False)
+
+    def test_keyless_google_cannot_be_the_only_enabled_source(self) -> None:
+        with pytest.raises(ValidationError, match="runnable"):
+            settings(
+                gutendex_enabled=False,
+                openlibrary_enabled=False,
+                googlebooks_enabled=True,
+                googlebooks_api_key=None,
+            )
 
 
 class TestEnvironmentLoading:

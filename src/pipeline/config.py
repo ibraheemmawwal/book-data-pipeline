@@ -57,6 +57,7 @@ class Settings(BaseSettings):
         # debugging trap, so unknown ones fail at startup.
         extra="forbid",
         frozen=True,
+        str_strip_whitespace=True,
     )
 
     # --- Catalogue database -------------------------------------------------
@@ -170,9 +171,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _require_an_active_source(self) -> Self:
         """A run with nothing to extract is a misconfiguration, not a no-op."""
-        if not any(self._is_enabled(source) for source in _EXTRACTION_ORDER):
+        if not self.active_sources():
             names = ", ".join(source.value for source in _EXTRACTION_ORDER)
-            msg = f"at least one source must be enabled (one of: {names})"
+            msg = f"at least one source must be runnable (one of: {names})"
             raise ValueError(msg)
         return self
 

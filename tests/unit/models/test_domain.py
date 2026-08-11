@@ -227,9 +227,43 @@ class TestGutendexNativeFields:
         book = CleanBook(
             **clean_kwargs(  # type: ignore[arg-type]
                 download_count=46103,
-                authors=[RawAuthor(name="Homer", birth_year=-750, death_year=-650)],
+                authors=[
+                    RawAuthor(
+                        name="Homer",
+                        source_author_id="name:homer",
+                        birth_year=-750,
+                        death_year=-650,
+                    )
+                ],
             )
         )
 
         assert book.download_count == 46103
         assert book.authors[0].birth_year == -750
+
+    def test_clean_author_requires_a_source_identity(self) -> None:
+        with pytest.raises(ValidationError, match="source_author_id"):
+            CleanBook(**clean_kwargs(authors=[RawAuthor(name="Anonymous")]))  # type: ignore[arg-type]
+
+
+class TestLanguagesArePreserved:
+    """A source's language list survives extraction intact.
+
+    Open Library returns one entry per edition of a work. Collapsing that to
+    its first element tagged *The Picture of Dorian Gray* as Czech in a live
+    run — the model has to keep what the source actually said and let transform
+    decide, because only transform knows that an ambiguous list is unusable.
+    """
+
+    def test_multiple_languages_survive(self) -> None:
+        book = RawBook(**raw_kwargs(languages=["eng", "cze", "fre"]))  # type: ignore[arg-type]
+
+        assert book.languages == ["eng", "cze", "fre"]
+
+    def test_a_single_language_is_still_a_list(self) -> None:
+        book = RawBook(**raw_kwargs(languages=["en"]))  # type: ignore[arg-type]
+
+        assert book.languages == ["en"]
+
+    def test_absent_languages_default_to_empty(self) -> None:
+        assert RawBook(**raw_kwargs()).languages == []  # type: ignore[arg-type]

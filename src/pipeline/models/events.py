@@ -6,13 +6,9 @@ three outcomes: a valid event, a malformed payload, and a payload from a
 future producer. Those take different DLQ paths and need different triage.
 
 Partition markers are pure boundary signals. They deliberately carry no record
-count: extractor retries reproduce records and DLQ routing removes them, so
-produced, transformed and loaded counts differ by design. Counts are
-observability, not a completion condition.
-
-A marker does carry ``partition_count`` — topology rather than data. Consumers
-decide completion by comparing durably recorded markers against that number, so
-a topic resized between runs cannot stall a run or finalise it early.
+or topology count. Consumers compare durable observations with the expectation
+frozen in ``run_topic_partitions`` before marker emission; an event is never an
+authority for broker topology.
 """
 
 from __future__ import annotations
@@ -62,11 +58,18 @@ class _Envelope(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: int = SCHEMA_VERSION
+    schema_version: Annotated[int, Field(strict=True)] = SCHEMA_VERSION
     event_id: UUID = Field(default_factory=uuid4)
     run_id: UUID
     event_type: EventType
     emitted_at: datetime = Field(default_factory=_utc_now)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema_version(cls, value: int) -> int:
+        if value != SCHEMA_VERSION:
+            raise UnsupportedSchemaVersionError(value)
+        return value
 
     @field_validator("emitted_at")
     @classmethod
@@ -129,12 +132,6 @@ class PartitionMarker(_Envelope):
     topic: str = Field(min_length=1)
     partition: int = Field(ge=0)
 
-    # The number of partitions the barrier actually wrote to for this run.
-    # Completion compares durably recorded markers against this number rather
-    # than re-reading broker metadata, so a topic resized between runs can
-    # neither stall a run forever nor finalise one early.
-    partition_count: int = Field(gt=0)
-
     @field_validator("event_type")
     @classmethod
     def _must_be_a_marker(cls, value: EventType) -> EventType:
@@ -143,20 +140,13 @@ class PartitionMarker(_Envelope):
             raise ValueError(msg)
         return value
 
-    @model_validator(mode="after")
-    def _partition_is_within_the_topology(self) -> Self:
-        """Partition 3 of a three-partition topic does not exist.
-
-        Recording an observation for it would leave a run permanently one
-        marker short of a boundary it can never reach.
-        """
-        if self.partition >= self.partition_count:
-            msg = (
-                f"partition {self.partition} is outside a topic with "
-                f"partition_count {self.partition_count}"
-            )
+    @field_validator("topic")
+    @classmethod
+    def _topic_has_a_completion_boundary(cls, value: str) -> str:
+        if value not in {"books.raw", "books.clean"}:
+            msg = "partition markers are valid only for books.raw or books.clean"
             raise ValueError(msg)
-        return self
+        return value
 
 
 def decode_event(data: bytes) -> BookEvent | PartitionMarker:
@@ -176,7 +166,7 @@ def decode_event(data: bytes) -> BookEvent | PartitionMarker:
     # Version first: a future contract may have renamed or removed anything
     # below, so no other field can be trusted until the version matches.
     version = document.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if type(version) is not int or version != SCHEMA_VERSION:
         raise UnsupportedSchemaVersionError(version)
 
     raw_type = document.get("event_type")

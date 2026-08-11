@@ -25,10 +25,16 @@ from pipeline.extract.base import (
     DEFAULT_BASE_DELAY_SECONDS,
     ExtractedItem,
     ExtractionRequest,
+    InvalidSourceRecordError,
     Rejected,
     SourceUnavailableError,
     build_client,
+    optional_list,
+    optional_object,
+    record_error_detail,
     request_with_retries,
+    require_object,
+    string_list,
 )
 from pipeline.models.domain import RawAuthor, RawBook, SourceName
 
@@ -70,7 +76,7 @@ class GutendexExtractor:
                     source=self.source_name.value,
                 )
                 try:
-                    page = response.json()
+                    page = require_object(response.json(), "response")
                 except json.JSONDecodeError as error:
                     # An HTML error page behind a 200 is a source problem, not a
                     # programming one, so it fails the source rather than the run.
@@ -79,61 +85,87 @@ class GutendexExtractor:
                         f"response was not JSON: {error}",
                         status_code=response.status_code,
                     ) from error
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
 
-                for record in page.get("results", []):
+                try:
+                    results = optional_list(page, "results")
+                except InvalidSourceRecordError as error:
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        str(error),
+                        status_code=response.status_code,
+                    ) from error
+
+                for record in results:
                     if emitted >= request.max_records:
                         return
                     yield self._to_item(record)
                     emitted += 1
 
                 # The API's own next link; params are already baked into it.
-                url = page.get("next")
+                next_url = page.get("next")
+                if next_url is not None and not isinstance(next_url, str):
+                    raise SourceUnavailableError(
+                        self.source_name.value,
+                        f"next must be a URL string or null, got {type(next_url).__name__}",
+                        status_code=response.status_code,
+                    )
+                url = next_url
                 params = None
 
-    def _to_item(self, record: dict[str, Any]) -> ExtractedItem:
+    def _to_item(self, payload: object) -> ExtractedItem:
         """Map one source record, turning any failure into a rejection.
 
         Never raises. One malformed record must cost that record, not the page.
         """
-        source_id = record.get("id")
+        record: dict[str, Any] | None = None
+        source_id: object = None
         try:
+            record = require_object(payload, "record")
+            source_id = record.get("id")
+            authors = [_to_author(author) for author in optional_list(record, "authors")]
+            formats = optional_object(record, "formats")
             return RawBook(
                 source=self.source_name,
                 source_id=source_id,  # type: ignore[arg-type]
                 title=record.get("title"),  # type: ignore[arg-type]
-                authors=[_to_author(a) for a in record.get("authors", [])],
-                subjects=list(record.get("subjects", [])),
-                language=_first(record.get("languages")),
-                description=_first(record.get("summaries")),
-                cover_url=(record.get("formats") or {}).get(COVER_MIME),
+                authors=authors,
+                subjects=string_list(record, "subjects"),
+                languages=string_list(record, "languages"),
+                description=_first_non_empty(string_list(record, "summaries")),
+                cover_url=formats.get(COVER_MIME),
                 download_count=record.get("download_count"),
                 raw_payload=record,
             )
-        except ValidationError as error:
+        except (InvalidSourceRecordError, ValidationError) as error:
             logger.warning(
                 "gutendex.record_rejected",
                 source_id=source_id,
-                errors=error.error_count(),
+                errors=error.error_count() if isinstance(error, ValidationError) else 1,
             )
             return Rejected(
                 source=self.source_name,
                 source_id=str(source_id) if source_id is not None else None,
-                raw_payload=record,
+                raw_payload=payload,
                 rejection_code="invalid_record",
-                detail="; ".join(
-                    f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in error.errors()
-                )[:500],
+                detail=record_error_detail(error),
             )
 
 
-def _to_author(payload: dict[str, Any]) -> RawAuthor:
+def _to_author(payload: object) -> RawAuthor:
+    document = require_object(payload, "authors item")
     return RawAuthor(
-        name=payload.get("name"),  # type: ignore[arg-type]
-        birth_year=payload.get("birth_year"),
-        death_year=payload.get("death_year"),
+        name=document.get("name"),  # type: ignore[arg-type]
+        birth_year=document.get("birth_year"),
+        death_year=document.get("death_year"),
     )
 
 
-def _first(values: list[str] | None) -> str | None:
-    """The first entry, or None. Gutendex uses lists even for single values."""
-    return values[0] if values else None
+def _first_non_empty(values: list[str]) -> str | None:
+    """The first non-blank entry, or None."""
+    return next((value for value in values if value.strip()), None)
