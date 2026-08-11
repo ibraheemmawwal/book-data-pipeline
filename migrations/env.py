@@ -7,6 +7,7 @@ they are talking to — and so no connection string is ever committed.
 
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -29,7 +30,19 @@ def _database_url() -> str:
 
     Tests point this at a throwaway container by setting the option directly.
     """
-    return config.get_main_option("sqlalchemy.url") or Settings().database_url  # type: ignore[call-arg]
+    explicit = config.get_main_option("sqlalchemy.url")
+    if explicit:
+        return explicit
+
+    # A migration needs a database URL and nothing else. Going through the full
+    # Settings object made it need an Open Library contact address too, which
+    # made the schema unrunnable by anyone who is not running the pipeline —
+    # a DBA applying it by hand, or the API repository's integration suite.
+    direct = os.environ.get("PIPELINE_DATABASE_URL")
+    if direct:
+        return direct
+
+    return str(Settings().database_url)  # type: ignore[call-arg]
 
 
 def run_migrations_offline() -> None:
