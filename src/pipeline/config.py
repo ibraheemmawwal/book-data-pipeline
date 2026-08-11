@@ -148,6 +148,11 @@ class Settings(BaseSettings):
     goodreads_min_match_score: Annotated[float, Field(ge=0, le=1)] = 0.4
 
     # --- Kafka (phase 2) ----------------------------------------------------
+    # Read at DAG parse time to choose the graph shape. A real setting rather
+    # than a bare environment lookup, because Settings rejects unknown
+    # PIPELINE_* variables — the guard that catches a misspelled name would
+    # otherwise reject a legitimate one.
+    kafka_enabled: bool = False
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_raw_topic: str = "books.raw"
     kafka_clean_topic: str = "books.clean"

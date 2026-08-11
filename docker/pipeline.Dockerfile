@@ -21,14 +21,18 @@ WORKDIR /app
 # source, so an edit to a module does not re-resolve the whole environment.
 # README too: pyproject declares it, so the build fails without it.
 COPY pyproject.toml uv.lock README.md ./
+# --extra kafka: the consumer services need the client, and it is an optional
+# extra so that a phase 1 install stays light. Omitting it here builds an image
+# whose consumers crash on their first import — which no unit test catches,
+# because they run against a fake client.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev --extra kafka
 
 COPY src/ ./src/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --extra kafka
 
 
 FROM python:3.12-slim-bookworm AS runtime

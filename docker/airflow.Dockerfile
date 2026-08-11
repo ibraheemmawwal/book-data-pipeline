@@ -25,7 +25,10 @@ COPY --chown=airflow:root src/ ./src/
 COPY --chown=airflow:root migrations/ ./migrations/
 COPY --chown=airflow:root alembic.ini ./
 
-RUN pip install --no-cache-dir -e . \
+# [kafka] because the phase 2 DAG produces onto books.raw. Without it the
+# task fails on import, which no DagBag test catches: parsing the file
+# never reaches the deferred imports inside a task body.
+RUN pip install --no-cache-dir -e ".[kafka]" \
     && python -c "import pipeline; print('pipeline', pipeline.__version__)"
 
 USER root

@@ -40,6 +40,20 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = commands.add_parser("ingest", help="Resolve candidates and load the catalogue.")
     ingest.add_argument("--limit", type=int, help="Stop after this many candidates.")
 
+    commands.add_parser(
+        "transform-consumer",
+        help="Run the books.raw -> books.clean consumer until stopped (v2.0).",
+    )
+    commands.add_parser(
+        "load-consumer",
+        help="Run the books.clean -> catalogue consumer until stopped (v2.0).",
+    )
+    barrier = commands.add_parser(
+        "emit-run-boundary",
+        help="Freeze topology and emit this run's raw partition markers (v2.0).",
+    )
+    barrier.add_argument("--run-id", required=True, help="The ingestion run UUID.")
+
     return parser
 
 
@@ -78,6 +92,26 @@ def _ingest(settings: Settings, args: argparse.Namespace) -> int:
     return 0 if report.status != "failed" else 1
 
 
+def _consume(settings: Settings, which: str) -> int:
+    """Run a long-lived consumer until the process is stopped."""
+    from pipeline.services import build_load_consumer, build_transform_consumer  # noqa: PLC0415
+
+    build = build_transform_consumer if which == "transform" else build_load_consumer
+    stats = build(settings).run()
+    logger.info("cli.consumer_stopped", consumer=which, stats=vars(stats))
+    return 0
+
+
+def _emit_boundary(settings: Settings, args: argparse.Namespace) -> int:
+    from uuid import UUID  # noqa: PLC0415
+
+    from pipeline.services import emit_run_boundary  # noqa: PLC0415
+
+    partitions = emit_run_boundary(settings, UUID(args.run_id))
+    logger.info("cli.boundary_emitted", run_id=args.run_id, partitions=partitions)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command."""
     parser = build_parser()
@@ -90,6 +124,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = Settings()
     if args.command == "discover":
         return _discover(settings, args)
+    if args.command == "transform-consumer":
+        return _consume(settings, "transform")
+    if args.command == "load-consumer":
+        return _consume(settings, "load")
+    if args.command == "emit-run-boundary":
+        return _emit_boundary(settings, args)
     return _ingest(settings, args)
 
 

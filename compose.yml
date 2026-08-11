@@ -26,6 +26,8 @@ x-pipeline-env: &pipeline-env
   # contract used under an accepted risk; a default clone must never touch it.
   PIPELINE_GOODREADS_ENABLED: ${PIPELINE_GOODREADS_ENABLED:-false}
   PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED: ${PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED:-false}
+  PIPELINE_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  PIPELINE_KAFKA_TOPIC_PARTITIONS: ${PIPELINE_KAFKA_TOPIC_PARTITIONS:-3}
 
 x-airflow-common: &airflow-common
   build:
@@ -152,6 +154,12 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    environment:
+      <<: *airflow-env
+      # Airflow fixes the task graph when it parses the file, so the phase is
+      # a parse-time decision. Set here and on the dag-processor only, and only
+      # when the kafka profile supplies a broker to produce to.
+      PIPELINE_KAFKA_ENABLED: ${PIPELINE_KAFKA_ENABLED:-false}
     depends_on:
       airflow-db:
         condition: service_healthy
@@ -164,6 +172,95 @@ services:
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
+    environment:
+      <<: *airflow-env
+      PIPELINE_KAFKA_ENABLED: ${PIPELINE_KAFKA_ENABLED:-false}
+    restart: unless-stopped
+
+  # --- phase 2: kafka ----------------------------------------------------
+  kafka:
+    profiles: [kafka]
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Never left to auto-creation. An auto-created topic gets
+      # num.partitions=1, so the barrier's write to partition 1 or 2 fails and
+      # a consumer waiting on a three-partition boundary waits forever.
+      # Disabling it turns that silent stall into a startup error.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-topics:
+    profiles: [kafka]
+    image: apache/kafka:3.9.0
+    # Idempotent: --if-not-exists means restarting the stack is free. Every
+    # producer and consumer waits on this completing.
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        for topic in books.raw books.clean; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$topic" \
+            --partitions ${PIPELINE_KAFKA_TOPIC_PARTITIONS:-3} --replication-factor 1
+        done
+        # One partition: the DLQ is drained by a human, not scaled.
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic books.dlq \
+          --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+
+  transform-consumer:
+    profiles: [kafka]
+    build:
+      context: .
+      dockerfile: docker/pipeline.Dockerfile
+    command: ["transform-consumer"]
+    environment: *pipeline-env
+    volumes:
+      - staging:/staging
+    depends_on:
+      catalogue-migrate:
+        condition: service_completed_successfully
+      kafka-topics:
+        condition: service_completed_successfully
+    # Long-running by design: the DAG schedules extraction and finishes, and
+    # these carry the run from there.
+    restart: unless-stopped
+
+  load-consumer:
+    profiles: [kafka]
+    build:
+      context: .
+      dockerfile: docker/pipeline.Dockerfile
+    command: ["load-consumer"]
+    environment: *pipeline-env
+    volumes:
+      - staging:/staging
+    depends_on:
+      catalogue-migrate:
+        condition: service_completed_successfully
+      kafka-topics:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

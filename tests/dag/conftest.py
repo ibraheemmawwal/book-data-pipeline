@@ -32,11 +32,44 @@ if str(DAGS_FOLDER) not in sys.path:
     sys.path.insert(0, str(DAGS_FOLDER))
 
 
-@pytest.fixture(scope="session")
-def dagbag() -> object:
-    """The project's DAGs, parsed the way Airflow parses them."""
+def _parse() -> object:
+    """Parse the DAGs folder fresh.
+
+    Deliberately not cached across shapes: Airflow fixes the task graph when it
+    reads the file, so testing both phases means re-importing the module under
+    a different environment.
+    """
     # Airflow 3 moved DagBag out of airflow.models and dropped
     # include_examples; AIRFLOW__CORE__LOAD_EXAMPLES now does that job.
     from airflow.dag_processing.dagbag import DagBag
 
+    sys.modules.pop("book_ingestion_dag", None)
     return DagBag(dag_folder=str(DAGS_FOLDER))
+
+
+@pytest.fixture(scope="session")
+def dagbag() -> object:
+    """The phase 1 graph, which is what a default clone runs.
+
+    The flag is cleared explicitly rather than assumed absent: a developer with
+    PIPELINE_KAFKA_ENABLED exported would otherwise get the phase 2 graph here
+    and watch the phase 1 assertions fail for no visible reason.
+    """
+    previous = os.environ.pop("PIPELINE_KAFKA_ENABLED", None)
+    try:
+        return _parse()
+    finally:
+        if previous is not None:
+            os.environ["PIPELINE_KAFKA_ENABLED"] = previous
+
+
+@pytest.fixture
+def kafka_dagbag(monkeypatch: pytest.MonkeyPatch) -> object:
+    """The phase 2 graph."""
+    monkeypatch.setenv("PIPELINE_KAFKA_ENABLED", "true")
+    bag = _parse()
+    monkeypatch.delenv("PIPELINE_KAFKA_ENABLED", raising=False)
+    # Leave the module cache clean so a later session-scoped parse is not
+    # served the phase 2 shape.
+    sys.modules.pop("book_ingestion_dag", None)
+    return bag

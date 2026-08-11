@@ -17,6 +17,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -28,6 +29,7 @@ from pipeline.extract.goodreads import GoodreadsExtractor
 from pipeline.extract.resolver import CatalogueResolver, Resolution
 from pipeline.load import CatalogueLoader, record_attempts, record_rejection
 from pipeline.models.domain import CandidateBook, CleanBook, SourceName
+from pipeline.models.events import BookEvent
 from pipeline.observability.runs import finalise_run, record_source_skip, start_run
 from pipeline.transform import canonicalise, unify_identity
 
@@ -49,6 +51,8 @@ class IngestReport:
     books_updated: int = 0
     books_unchanged: int = 0
     attempts: int = 0
+    # Set by the phase 2 path so the barrier knows which run to close.
+    run_id: UUID | None = None
 
     @property
     def status(self) -> str:
@@ -213,4 +217,83 @@ def run_ingestion(
             records_loaded=report.books_inserted + report.books_updated,
             records_rejected=report.rejected,
         )
+    return report
+
+
+def run_resolution_to_sink(
+    settings: Settings,
+    sink: Any,
+    *,
+    limit: int | None = None,
+    engine: Engine | None = None,
+) -> IngestReport:
+    """Phase 2's extract stage: resolve candidates and publish raw events.
+
+    The same discovery and resolution as ``run_ingestion``, but the observations
+    go onto a topic instead of into the catalogue. Canonicalisation and loading
+    move to the consumers, which is what lets a slow load stop blocking
+    ingestion rather than stalling the whole run behind it.
+
+    Attempts and rejections are still written here. They belong to the
+    resolution that produced them, and a consumer has no way to reconstruct why
+    a source was skipped.
+    """
+    report = IngestReport()
+    active = engine or create_engine(settings.database_url)
+
+    goodreads_skip = settings.skip_reason(SourceName.GOODREADS)
+    goodreads = GoodreadsExtractor(settings) if goodreads_skip is None else None
+    resolver = CatalogueResolver(settings, goodreads=goodreads)
+
+    with active.begin() as connection:
+        run_id = start_run(connection)
+        if goodreads_skip is not None:
+            record_source_skip(connection, run_id, SourceName.GOODREADS, goodreads_skip)
+
+    try:
+        for batch in _batched(candidate_source(settings, limit), RESOLVE_BATCH):
+            report.candidates += len(batch)
+            resolutions = asyncio.run(_resolve_batch(resolver, batch))
+
+            events: list[BookEvent] = []
+            with active.begin() as connection:
+                for resolution in resolutions:
+                    if resolution.resolved:
+                        report.resolved += 1
+                    else:
+                        report.unresolved += 1
+
+                    report.attempts += record_attempts(connection, run_id, resolution.attempts)
+                    for rejection in resolution.rejections:
+                        record_rejection(connection, run_id, rejection, stage="extract")
+                        report.rejected += 1
+
+                    for observation in resolution.observations:
+                        report.observations += 1
+                        events.append(
+                            BookEvent(
+                                run_id=run_id,
+                                source=observation.source,
+                                source_id=observation.source_id,
+                                payload=observation.raw_payload,
+                            )
+                        )
+
+            if events:
+                sink.emit(events)
+                # Flushed per batch, so a crash costs one batch of re-resolved
+                # candidates rather than the whole run's external calls.
+                sink.flush()
+
+            logger.info(
+                "resolution.batch_produced",
+                candidates=report.candidates,
+                produced=report.observations,
+            )
+    except Exception:
+        with active.begin() as connection:
+            finalise_run(connection, run_id, status="failed")
+        raise
+
+    report.run_id = run_id
     return report

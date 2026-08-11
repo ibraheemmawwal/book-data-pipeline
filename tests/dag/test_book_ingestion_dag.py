@@ -126,3 +126,49 @@ class TestXComDiscipline:
 
         assert "manifest_path" in source
         assert "candidates" in source
+
+
+class TestPhaseTwoShape:
+    """The graph Airflow builds when Kafka is enabled.
+
+    The shape is chosen at parse time because that is when Airflow fixes the
+    task graph — a run cannot pick a phase. Compose sets the flag on the kafka
+    profile and nowhere else, so a default clone always gets phase 1.
+    """
+
+    def test_it_still_parses(self, kafka_dagbag: Any) -> None:
+        assert kafka_dagbag.import_errors == {}
+
+    def test_resolution_produces_instead_of_loading(self, kafka_dagbag: Any) -> None:
+        tasks = set(kafka_dagbag.dags[DAG_ID].task_ids)
+
+        assert "resolve_and_produce" in tasks
+        assert "resolve_and_load" not in tasks
+
+    def test_it_emits_a_run_boundary(self, kafka_dagbag: Any) -> None:
+        # Without it the consumers would process every event and never learn
+        # the run had ended.
+        assert "emit_run_boundary" in kafka_dagbag.dags[DAG_ID].task_ids
+
+    def test_the_dag_does_not_load_the_catalogue(self, kafka_dagbag: Any) -> None:
+        # Loading belongs to a consumer now. A finalise task here would close a
+        # run the consumers are still working on.
+        assert "finalise_run" not in kafka_dagbag.dags[DAG_ID].task_ids
+
+    def test_the_boundary_waits_for_the_run_to_be_judged(self, kafka_dagbag: Any) -> None:
+        # Closing a topic for a run that resolved nothing would hand the
+        # consumers an empty run to finalise.
+        boundary = kafka_dagbag.dags[DAG_ID].get_task("emit_run_boundary")
+
+        assert "assess_extraction" in boundary.upstream_task_ids
+
+    def test_resolution_still_gets_the_longer_timeout(self, kafka_dagbag: Any) -> None:
+        assert kafka_dagbag.dags[DAG_ID].get_task(
+            "resolve_and_produce"
+        ).execution_timeout == timedelta(hours=6)
+
+    def test_the_default_shape_is_phase_one(self, dagbag: Any) -> None:
+        # A clone with no Kafka configured must not build a graph that produces
+        # onto a topic nothing is consuming.
+        assert "resolve_and_load" in dagbag.dags[DAG_ID].task_ids
+        assert "emit_run_boundary" not in dagbag.dags[DAG_ID].task_ids
