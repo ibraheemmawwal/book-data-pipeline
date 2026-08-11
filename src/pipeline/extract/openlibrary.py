@@ -53,10 +53,13 @@ MAX_RESULTS_PER_PAGE = 100
 COVER_URL = "https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
 
 
+SOURCE = SourceName.OPENLIBRARY
+
+
 class OpenLibraryExtractor:
     """Fetches bounded enrichment documents from Open Library search."""
 
-    source_name = SourceName.OPENLIBRARY
+    source_name = SOURCE
 
     def __init__(
         self,
@@ -142,45 +145,7 @@ class OpenLibraryExtractor:
                 page += 1
 
     def _to_item(self, payload: object) -> ExtractedItem:
-        """Map one search document; any failure becomes a rejection."""
-        key: object = None
-        try:
-            doc = require_object(payload, "document")
-            key = doc.get("key")
-            cover_id = doc.get("cover_i")
-            if cover_id is not None and (
-                isinstance(cover_id, bool) or not isinstance(cover_id, int)
-            ):
-                msg = f"cover_i must be an integer, got {type(cover_id).__name__}"
-                raise InvalidSourceRecordError(msg)
-            return RawBook(
-                source=self.source_name,
-                source_id=key,  # type: ignore[arg-type]
-                title=doc.get("title"),  # type: ignore[arg-type]
-                subtitle=doc.get("subtitle"),
-                authors=_to_authors(doc),
-                subjects=string_list(doc, "subject")[:50],
-                isbns=string_list(doc, "isbn"),
-                languages=string_list(doc, "language"),
-                published=_year_as_text(doc.get("first_publish_year")),
-                publisher=_first_non_empty(string_list(doc, "publisher")),
-                page_count=doc.get("number_of_pages_median"),
-                cover_url=COVER_URL.format(cover_id=cover_id) if cover_id else None,
-                raw_payload=doc,
-            )
-        except (InvalidSourceRecordError, ValidationError) as error:
-            logger.warning(
-                "openlibrary.record_rejected",
-                source_id=key,
-                errors=error.error_count() if isinstance(error, ValidationError) else 1,
-            )
-            return Rejected(
-                source=self.source_name,
-                source_id=str(key) if key is not None else None,
-                raw_payload=payload,
-                rejection_code="invalid_record",
-                detail=record_error_detail(error),
-            )
+        return map_payload(payload)
 
 
 def _to_authors(doc: dict[str, Any]) -> list[RawAuthor]:
@@ -214,3 +179,43 @@ def _year_as_text(year: object) -> str | None:
         msg = f"first_publish_year must be an integer or string, got {type(year).__name__}"
         raise InvalidSourceRecordError(msg)
     return str(year)
+
+
+def map_payload(payload: object) -> ExtractedItem:
+    """Map one search document; any failure becomes a rejection."""
+    key: object = None
+    try:
+        doc = require_object(payload, "document")
+        key = doc.get("key")
+        cover_id = doc.get("cover_i")
+        if cover_id is not None and (isinstance(cover_id, bool) or not isinstance(cover_id, int)):
+            msg = f"cover_i must be an integer, got {type(cover_id).__name__}"
+            raise InvalidSourceRecordError(msg)
+        return RawBook(
+            source=SOURCE,
+            source_id=key,  # type: ignore[arg-type]
+            title=doc.get("title"),  # type: ignore[arg-type]
+            subtitle=doc.get("subtitle"),
+            authors=_to_authors(doc),
+            subjects=string_list(doc, "subject")[:50],
+            isbns=string_list(doc, "isbn"),
+            languages=string_list(doc, "language"),
+            published=_year_as_text(doc.get("first_publish_year")),
+            publisher=_first_non_empty(string_list(doc, "publisher")),
+            page_count=doc.get("number_of_pages_median"),
+            cover_url=COVER_URL.format(cover_id=cover_id) if cover_id else None,
+            raw_payload=doc,
+        )
+    except (InvalidSourceRecordError, ValidationError) as error:
+        logger.warning(
+            "openlibrary.record_rejected",
+            source_id=key,
+            errors=error.error_count() if isinstance(error, ValidationError) else 1,
+        )
+        return Rejected(
+            source=SOURCE,
+            source_id=str(key) if key is not None else None,
+            raw_payload=payload,
+            rejection_code="invalid_record",
+            detail=record_error_detail(error),
+        )

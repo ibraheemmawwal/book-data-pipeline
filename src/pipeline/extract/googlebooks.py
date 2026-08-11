@@ -54,10 +54,13 @@ class MissingCredentialError(Exception):
     """
 
 
+SOURCE = SourceName.GOOGLEBOOKS
+
+
 class GoogleBooksExtractor:
     """Fetches volumes from the Google Books API."""
 
-    source_name = SourceName.GOOGLEBOOKS
+    source_name = SOURCE
 
     def __init__(
         self,
@@ -150,45 +153,7 @@ class GoogleBooksExtractor:
                     return
 
     def _to_item(self, payload: object) -> ExtractedItem:
-        """Map one volume; any failure becomes a rejection."""
-        volume_id: object = None
-        try:
-            volume = require_object(payload, "volume")
-            volume_id = volume.get("id")
-            info = optional_object(volume, "volumeInfo")
-            language = info.get("language")
-            if language is not None and not isinstance(language, str):
-                msg = f"language must be a string, got {type(language).__name__}"
-                raise InvalidSourceRecordError(msg)
-            return RawBook(
-                source=self.source_name,
-                source_id=volume_id,  # type: ignore[arg-type]
-                title=info.get("title"),  # type: ignore[arg-type]
-                subtitle=info.get("subtitle"),
-                authors=[RawAuthor(name=name) for name in string_list(info, "authors") if name],
-                subjects=string_list(info, "categories"),
-                isbns=_isbns(info),
-                languages=[language] if language else [],
-                published=info.get("publishedDate"),
-                publisher=info.get("publisher"),
-                page_count=info.get("pageCount"),
-                description=info.get("description"),
-                cover_url=_cover(info),
-                raw_payload=volume,
-            )
-        except (InvalidSourceRecordError, ValidationError) as error:
-            logger.warning(
-                "googlebooks.record_rejected",
-                source_id=volume_id,
-                errors=error.error_count() if isinstance(error, ValidationError) else 1,
-            )
-            return Rejected(
-                source=self.source_name,
-                source_id=str(volume_id) if volume_id is not None else None,
-                raw_payload=payload,
-                rejection_code="invalid_record",
-                detail=record_error_detail(error),
-            )
+        return map_payload(payload)
 
 
 def _isbns(info: dict[str, Any]) -> list[str]:
@@ -221,3 +186,45 @@ def _cover(info: dict[str, Any]) -> str | None:
         msg = f"imageLinks value must be a string, got {type(value).__name__}"
         raise InvalidSourceRecordError(msg)
     return value
+
+
+def map_payload(payload: object) -> ExtractedItem:
+    """Map one volume; any failure becomes a rejection."""
+    volume_id: object = None
+    try:
+        volume = require_object(payload, "volume")
+        volume_id = volume.get("id")
+        info = optional_object(volume, "volumeInfo")
+        language = info.get("language")
+        if language is not None and not isinstance(language, str):
+            msg = f"language must be a string, got {type(language).__name__}"
+            raise InvalidSourceRecordError(msg)
+        return RawBook(
+            source=SOURCE,
+            source_id=volume_id,  # type: ignore[arg-type]
+            title=info.get("title"),  # type: ignore[arg-type]
+            subtitle=info.get("subtitle"),
+            authors=[RawAuthor(name=name) for name in string_list(info, "authors") if name],
+            subjects=string_list(info, "categories"),
+            isbns=_isbns(info),
+            languages=[language] if language else [],
+            published=info.get("publishedDate"),
+            publisher=info.get("publisher"),
+            page_count=info.get("pageCount"),
+            description=info.get("description"),
+            cover_url=_cover(info),
+            raw_payload=volume,
+        )
+    except (InvalidSourceRecordError, ValidationError) as error:
+        logger.warning(
+            "googlebooks.record_rejected",
+            source_id=volume_id,
+            errors=error.error_count() if isinstance(error, ValidationError) else 1,
+        )
+        return Rejected(
+            source=SOURCE,
+            source_id=str(volume_id) if volume_id is not None else None,
+            raw_payload=payload,
+            rejection_code="invalid_record",
+            detail=record_error_detail(error),
+        )

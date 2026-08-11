@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from pipeline.config import Settings
+from pipeline.extract import googlebooks, gutendex, openlibrary
 from pipeline.extract.base import (
     ExtractedItem,
     ExtractionRequest,
@@ -33,6 +34,7 @@ __all__ = [
     "Rejected",
     "SourceUnavailableError",
     "build_extractor",
+    "map_payload",
 ]
 
 # Typed as a factory rather than a class map: the three constructors take
@@ -52,3 +54,19 @@ def build_extractor(source: SourceName, settings: Settings) -> Extractor:
     is one entry here rather than a change at every call site.
     """
     return _EXTRACTORS[source](settings)
+
+
+# Mapping a stored payload back to a RawBook needs no Settings and no HTTP
+# client. The load layer relies on this: canonical fields are recomputed from
+# every book_sources row attached to a book, and those rows hold raw payloads
+# from runs that finished long ago.
+_MAPPERS: dict[SourceName, Callable[[object], ExtractedItem]] = {
+    SourceName.GUTENDEX: gutendex.map_payload,
+    SourceName.OPENLIBRARY: openlibrary.map_payload,
+    SourceName.GOOGLEBOOKS: googlebooks.map_payload,
+}
+
+
+def map_payload(source: SourceName, payload: object) -> ExtractedItem:
+    """Re-map a stored raw payload using the source's own mapper."""
+    return _MAPPERS[source](payload)
