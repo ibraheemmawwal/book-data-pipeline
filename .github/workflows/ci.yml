@@ -27,11 +27,14 @@ jobs:
     name: Lint, format and types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -42,11 +45,14 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       # --cov-fail-under=0 overrides the project's fail_under for this job.
       # One job cannot fairly judge coverage of code another job exercises:
@@ -56,7 +62,7 @@ jobs:
         run: uv run pytest -m "not integration" --cov=src --cov-report= --cov-fail-under=0
         env:
           COVERAGE_FILE: .coverage.unit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-unit
           path: .coverage.unit
@@ -69,11 +75,14 @@ jobs:
     name: PostgreSQL integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
       # testcontainers starts its own PostgreSQL 16, matching the deployment
       # target. A service container would be a second, differently-configured
@@ -85,7 +94,7 @@ jobs:
           --cov=src --cov-report= --cov-fail-under=0
         env:
           COVERAGE_FILE: .coverage.postgres
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-postgres
           path: .coverage.postgres
@@ -97,13 +106,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: [unit, postgres-integration]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
+          # Per job: four parallel jobs sharing one key race to reserve it and
+          # the losers emit a save warning on every run.
+          cache-suffix: ${{ github.job }}
       - run: uv sync --all-groups
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           merge-multiple: true
@@ -114,7 +126,7 @@ jobs:
           uv run coverage combine
           uv run coverage report --show-missing
           uv run coverage xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
