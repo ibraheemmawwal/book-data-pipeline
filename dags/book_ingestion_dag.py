@@ -13,6 +13,11 @@ travel between tasks; books do not. XCom lives in the metadata database, and a
 run pushing 6,000 books through it would be writing the catalogue twice, into
 the wrong database, in a format nothing can query.
 
+Adjudicating records the sources disagree about is deliberately *not* here —
+it lives in the ``contested_resolution`` DAG. It asks a different question over
+a different timespan, and running it in both places would put two writers on
+the same set of books, which is how a stray duplicate appeared once.
+
 **The graph has two shapes.** In phase 1 the DAG loads the catalogue itself. In
 phase 2 it resolves candidates onto ``books.raw``, emits the run boundary, and
 finishes — transform and load become long-running consumers. That is a
@@ -260,45 +265,6 @@ def book_ingestion() -> None:
         return {**outcome, "partitions": partitions}
 
     @task
-    def resolve_contested_books() -> dict[str, Any]:
-        """Adjudicate records the documented sources disagree about.
-
-        Its own task because it is a different question from ingestion. Everything
-        before this asks "what do the sources say"; this asks "which of them is
-        right where they conflict", and only for the minority where they do.
-
-        A no-op unless the Goodreads gates are set. Running it on a schedule
-        moves when that decision is checked, not whether it is — and the bound
-        is per run, so a nightly pipeline queries the same small number each
-        time rather than accumulating.
-        """
-        from pipeline.config import Settings
-        from pipeline.contested import resolve_contested
-        from pipeline.extract.goodreads import GoodreadsNotAcceptedError
-
-        settings = Settings()
-        if not settings.resolve_contested_enabled:
-            return {"skipped": "disabled", "queried": 0}
-
-        try:
-            report = resolve_contested(
-                settings,
-                minimum_conflicts=settings.contested_min_conflicts,
-                limit=settings.contested_max_per_run,
-            )
-        except GoodreadsNotAcceptedError as error:
-            # Not a failure. The tie-breaker is optional and its absence leaves
-            # the catalogue exactly as the documented sources described it.
-            return {"skipped": str(error)[:120], "queried": 0}
-
-        return {
-            "contested": report.contested,
-            "queried": report.queried,
-            "resolved": report.resolved,
-            "loaded": report.loaded,
-        }
-
-    @task
     def assess_extraction(discovery: dict[str, Any], outcome: dict[str, Any]) -> str:
         """Decide whether the run produced a usable catalogue.
 
@@ -349,20 +315,14 @@ def book_ingestion() -> None:
         # The boundary is emitted only after the run is judged worth
         # continuing: closing a topic for a run that resolved nothing would
         # hand the consumers an empty run to finalise.
-        boundary = emit_run_boundary(outcome)
-        boundary.set_upstream(status)
+        emit_run_boundary(outcome).set_upstream(status)
         # Tie-breaking runs last and downstream of the boundary, because it
         # reads what the consumers wrote. Started earlier it would adjudicate a
         # catalogue the current run had not finished writing.
-        # No data dependency — it reads the catalogue, not the previous
-        # task's return. Taking an argument it never used would have
-        # implied one and drawn a misleading edge.
-        resolve_contested_books().set_upstream(boundary)
     else:
         outcome = resolve_and_load(discovery)
         status = assess_extraction(discovery, outcome)
-        finalised = finalise_run(status, outcome)
-        resolve_contested_books().set_upstream(finalised)
+        finalise_run(status, outcome)
 
 
 book_ingestion()

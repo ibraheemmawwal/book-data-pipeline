@@ -61,7 +61,6 @@ class TestTaskGraph:
             "resolve_and_load",
             "assess_extraction",
             "finalise_run",
-            "resolve_contested_books",
         }
 
     @pytest.mark.parametrize(
@@ -86,22 +85,18 @@ class TestTaskGraph:
         """
         assert dagbag.dags[DAG_ID].get_task("fetch_dump").upstream_task_ids == set()
 
+    def test_adjudication_is_not_part_of_ingestion(self, dagbag: Any) -> None:
+        """It lives in the contested_resolution DAG.
+
+        Running it in both put two writers on the same books and left a stray
+        duplicate behind.
+        """
+        assert "resolve_contested_books" not in dagbag.dags[DAG_ID].task_ids
+
     def test_discovery_waits_for_the_dump(self, dagbag: Any) -> None:
         upstream = dagbag.dags[DAG_ID].get_task("discover_candidates").upstream_task_ids
 
         assert upstream == {"fetch_dump"}
-
-    def test_tie_breaking_runs_after_the_catalogue_is_written(self, dagbag: Any) -> None:
-        # It adjudicates what the run produced; started earlier it would judge
-        # a catalogue this run had not finished writing.
-        upstream = dagbag.dags[DAG_ID].get_task("resolve_contested_books").upstream_task_ids
-
-        assert upstream == {"finalise_run"}
-
-    def test_tie_breaking_is_last(self, dagbag: Any) -> None:
-        task = dagbag.dags[DAG_ID].get_task("resolve_contested_books")
-
-        assert task.downstream_task_ids == set()
 
 
 class TestTimeouts:
