@@ -295,6 +295,16 @@ class CatalogueLoader:
             )
             connection.execute(delete(link).where(link.c.book_id == orphan_id))
 
+        # Series memberships are deliberately not moved. book_series.book_id
+        # cascades on delete, so the orphan's links go with it — and they are
+        # rebuilt a moment later, in this same transaction, because
+        # book_sources moved first and _recompute derives series from the
+        # payloads attached to the surviving book. Moving them by hand would
+        # duplicate the recompute and give the merge a second, divergent
+        # opinion about position and confirmation.
+        #
+        # This looks like data loss on a read of _merge alone, and has been
+        # reported as such. TestAMergeKeepsTheSeries pins the outcome.
         connection.execute(delete(books).where(books.c.id == orphan_id))
 
         result.merges += 1

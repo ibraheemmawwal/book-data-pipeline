@@ -1042,3 +1042,110 @@ class TestRacesAndOddities:
         loader.load(engine, [openlibrary_payload("/works/OL1W", isbns=[isbn])])
 
         assert count(connection, books) == 1
+
+
+class TestAMergeKeepsTheSeries:
+    """What a merge must not quietly drop.
+
+    ``book_series.book_id`` cascades on delete, so a merge that removes the
+    orphan without moving its memberships takes the series relationships with
+    it. Nothing in the run report changes: no error, no rejection, the same
+    book count. The book just stops being part of a series, and only a reader
+    looking for the next volume would ever notice.
+    """
+
+    @staticmethod
+    def _with_series(
+        source_id: str,
+        *,
+        isbn: str | None,
+        position: str | None,
+        confirmed: bool,
+        name: str = "The Expanse",
+    ) -> CleanBook:
+        return _clean(
+            RawBook(
+                source=SourceName.GOODREADS,
+                source_id=source_id,
+                title="Leviathan Wakes",
+                isbns=[isbn] if isbn else [],
+                series=[
+                    RawSeriesMembership(
+                        name=name,
+                        position=position,
+                        confirmed=confirmed,
+                        source_series_id="45175" if confirmed else None,
+                    )
+                ],
+                # Canonical fields are recomputed by replaying this payload, so
+                # the membership has to be reconstructible from it. A parsed
+                # label alone is an inferred relationship; the /series/ id is
+                # what makes it confirmed.
+                raw_payload={
+                    "bookId": source_id,
+                    "title": "Leviathan Wakes",
+                    "isbn13": isbn,
+                    "_detail": {
+                        "series_label": f"Book {position} in the {name} series"
+                        if position
+                        else name,
+                        **({"series_id": "45175"} if confirmed else {}),
+                    },
+                },
+            )
+        )
+
+    def test_the_membership_survives(self, engine: Engine, connection: Connection) -> None:
+        isbn = "9780316129084"
+        loader = CatalogueLoader()
+        # A fallback-identity book with a series, then the same book arriving
+        # with an ISBN that another record already owns: the merge path.
+        loader.load(
+            engine, [self._with_series("gr-orphan", isbn=None, position="1", confirmed=True)]
+        )
+        loader.load(engine, [openlibrary_payload("/works/OLX", isbn=[isbn])])
+        loader.load(
+            engine, [self._with_series("gr-orphan", isbn=isbn, position="1", confirmed=True)]
+        )
+
+        links = connection.execute(select(book_series.c.book_id, book_series.c.position)).all()
+
+        assert len(links) == 1, "the merge dropped the series membership"
+        assert links[0].position == 1
+
+    def test_it_lands_on_the_surviving_book(self, engine: Engine, connection: Connection) -> None:
+        isbn = "9780316129091"
+        loader = CatalogueLoader()
+        loader.load(engine, [self._with_series("gr-a", isbn=None, position="2", confirmed=True)])
+        loader.load(engine, [openlibrary_payload("/works/OLY", isbn=[isbn])])
+        loader.load(engine, [self._with_series("gr-a", isbn=isbn, position="2", confirmed=True)])
+
+        survivor = connection.execute(select(books.c.id).where(books.c.isbn13 == isbn)).scalar_one()
+        owner = connection.execute(select(book_series.c.book_id)).scalar_one()
+
+        assert owner == survivor
+
+    def test_a_position_the_orphan_had_is_not_lost(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        """Why the move merges the row rather than skipping on conflict.
+
+        When both books already know the series, ON CONFLICT DO NOTHING keeps
+        whichever row existed — so a survivor that knew the series but not the
+        volume number would silently discard the position the orphan had.
+        """
+        isbn = "9780316129107"
+        loader = CatalogueLoader()
+        # The survivor knows the series but not which book it is.
+        loader.load(engine, [openlibrary_payload("/works/OLZ", isbn=[isbn])])
+        loader.load(
+            engine, [self._with_series("gb-noposition", isbn=isbn, position=None, confirmed=True)]
+        )
+        # The orphan knows the position, and is then merged in.
+        loader.load(engine, [self._with_series("gr-b", isbn=None, position="3", confirmed=True)])
+        loader.load(engine, [self._with_series("gr-b", isbn=isbn, position="3", confirmed=True)])
+
+        row = connection.execute(select(book_series.c.position, book_series.c.confirmed)).one()
+
+        assert row.position == 3, "the merge kept the survivor's empty position"
+        assert row.confirmed is True
