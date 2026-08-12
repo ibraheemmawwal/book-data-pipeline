@@ -138,6 +138,16 @@ class Settings(BaseSettings):
     # Contested re-resolution runs as part of the pipeline. It still refuses
     # unless the Goodreads gates are set, so this being on changes when the
     # decision is checked, not whether it is.
+    # Whether ingestion consults Goodreads for every candidate.
+    #
+    # Off by default, and that is the substantive position rather than a
+    # cautious one: its terms restrict automated collection, so asking it about
+    # every book cannot be justified by the fact that some books need
+    # adjudicating. The adapter stays wired for targeted use — contested
+    # resolution today, search later — and this decides only whether the bulk
+    # path uses it.
+    goodreads_in_resolution: bool = False
+
     resolve_contested_enabled: bool = True
     contested_min_conflicts: Annotated[int, Field(ge=1)] = 2
     contested_max_per_run: Annotated[int, Field(ge=0)] = 25

@@ -7,16 +7,21 @@ inside an extractor would make source attempts, latency and fallback reasons
 invisible — and an unofficial primary source is exactly the case where you need
 them visible.
 
-Order is contractual:
+Order is contractual, and documented sources carry it:
 
-1. **Goodreads** — preferred resolver, when both gates are set and its circuit
-   is closed.
-2. **The retained Open Library discovery payload** — free, already in hand, and
+1. **The retained Open Library discovery payload** — free, already in hand, and
    still required to pass the same validation as any API result.
-3. **Open Library Search and Google Books** — bounded live fallbacks, each with
-   a per-run budget.
-4. **Gutendex** — last resort only, with a small budget so an outage upstream
-   cannot quietly turn it back into the bulk source.
+2. **Open Library Search and Google Books** — bounded live lookups, each with a
+   per-run budget.
+3. **Gutendex** — public-domain works, bounded, so an outage upstream cannot
+   quietly turn it into the bulk source.
+
+**Goodreads** sits outside that order. The adapter is wired and the code path
+exists — ``goodreads_in_resolution`` turns it on, and the contested-resolution
+flow uses it directly — but ingestion does not consult it by default. Asking it
+about every book is what a preferred-resolver position means, and that is what
+its terms do not support; adjudicating the minority where documented sources
+conflict is a different claim.
 
 Every attempt is recorded, including the ones that were skipped and why.
 """
@@ -165,7 +170,14 @@ class CatalogueResolver:
         """Run one candidate through the hierarchy."""
         result = Resolution(candidate=candidate)
 
-        await self._try_goodreads(candidate, result, client)
+        # Documented sources carry ingestion. Goodreads is wired and ready —
+        # contested resolution uses it, and search may later — but it is not on
+        # the path every candidate takes, because a preferred-resolver position
+        # means asking it about every book, and that is the thing its terms do
+        # not support.
+        if self._settings.goodreads_in_resolution:
+            await self._try_goodreads(candidate, result, client)
+
         self._try_retained_discovery(candidate, result)
 
         # Two modes, and the difference is what the run is for.

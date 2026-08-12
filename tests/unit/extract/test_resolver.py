@@ -46,10 +46,17 @@ def autocomplete_payload() -> Any:
 
 @pytest.fixture
 def accepted(settings: Settings) -> Settings:
+    """Both gates open *and* Goodreads on the ingestion path.
+
+    The last flag is separate on purpose: opening the gates permits targeted
+    use, and putting the source on the path every candidate takes is a further
+    decision. These tests exercise that path, so they opt into it explicitly.
+    """
     return settings.model_copy(
         update={
             "goodreads_enabled": True,
             "goodreads_unofficial_source_accepted": True,
+            "goodreads_in_resolution": True,
             "goodreads_circuit_failure_threshold": 1,
         }
     )
@@ -153,10 +160,20 @@ class TestGoodreadsFirst:
 
 
 class TestGates:
-    async def test_an_unaccepted_source_is_skipped_with_a_reason(self, settings: Settings) -> None:
+    """Why Goodreads was not used, when it is on the ingestion path.
+
+    Recorded rather than silent: a source that was configured off and a source
+    that had nothing to say must be distinguishable afterwards.
+    """
+
+    @pytest.fixture
+    def on_path(self, settings: Settings) -> Settings:
+        return settings.model_copy(update={"goodreads_in_resolution": True})
+
+    async def test_an_unaccepted_source_is_skipped_with_a_reason(self, on_path: Settings) -> None:
         # Not an error: a clean clone runs the documented path without it.
         mock_live_fallbacks_empty()
-        resolver = CatalogueResolver(settings, goodreads=GoodreadsExtractor(settings))
+        resolver = CatalogueResolver(on_path, goodreads=GoodreadsExtractor(on_path))
 
         result = await resolver.resolve(candidate())
 
@@ -164,9 +181,9 @@ class TestGates:
         assert attempt.outcome is Outcome.SKIPPED
         assert "disabled" in (attempt.fallback_reason or "")
 
-    async def test_no_adapter_configured_is_skipped(self, settings: Settings) -> None:
+    async def test_no_adapter_configured_is_skipped(self, on_path: Settings) -> None:
         mock_live_fallbacks_empty()
-        result = await CatalogueResolver(settings).resolve(candidate())
+        result = await CatalogueResolver(on_path).resolve(candidate())
 
         assert outcome_for(result.attempts, SourceName.GOODREADS) is Outcome.SKIPPED
 
@@ -223,13 +240,19 @@ class TestRetainedDiscovery:
 
 
 class TestObservability:
-    async def test_every_source_attempt_is_recorded(self, settings: Settings) -> None:
+    async def test_every_documented_source_attempt_is_recorded(self, settings: Settings) -> None:
+        """A source that was skipped and one that had nothing must differ.
+
+        Goodreads is absent because ingestion no longer consults it; when it
+        does — goodreads_in_resolution — its attempts are recorded the same way,
+        which TestGates covers.
+        """
         mock_live_fallbacks_empty()
         result = await CatalogueResolver(settings).resolve(candidate())
 
         assert {a.source for a in result.attempts} >= {
-            SourceName.GOODREADS,
             SourceName.OPENLIBRARY,
+            SourceName.GOOGLEBOOKS,
         }
 
     async def test_attempts_carry_the_candidate_key(self, settings: Settings) -> None:
