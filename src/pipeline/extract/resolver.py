@@ -182,10 +182,19 @@ class CatalogueResolver:
         if self._settings.enrich_from_documented_sources or not result.resolved:
             await self._try_live_fallbacks(candidate, result)
 
-        # Gutendex only when nothing else produced a record. Its budget is
-        # small on purpose: an outage upstream must not promote a public-domain
-        # mirror back into being the bulk source.
-        if not result.resolved:
+        # Gutendex, when nothing else produced a record — or, under
+        # enrichment, as a third opinion.
+        #
+        # It only holds public-domain works, so enriching with it reaches a
+        # subset of the catalogue and leaves the rest untouched. That is the
+        # point: on a nineteenth-century classic it is a genuinely independent
+        # reading of the same book, and three sources disagreeing is a stronger
+        # signal than two.
+        #
+        # The budget still bounds it, and that guard is what keeps this from
+        # promoting a public-domain mirror back into being the bulk source —
+        # the failure the small budget exists to prevent.
+        if self._settings.enrich_from_documented_sources or not result.resolved:
             await self._try_gutendex(candidate, result)
 
         return result
