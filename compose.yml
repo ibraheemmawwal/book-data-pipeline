@@ -67,7 +67,7 @@ x-airflow-common: &airflow-common
 services:
   # --- databases ---------------------------------------------------------
   catalogue-db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: catalogue
       POSTGRES_PASSWORD: catalogue
@@ -83,7 +83,7 @@ services:
       retries: 20
 
   airflow-db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow

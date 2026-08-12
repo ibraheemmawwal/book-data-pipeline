@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 @pytest.fixture(scope="session")
 def postgres_url() -> Iterator[str]:
     """A throwaway PostgreSQL 16, matching the deployment target."""
-    with PostgresContainer("postgres:16-alpine", driver="psycopg") as container:
+    with PostgresContainer("postgres:18-alpine", driver="psycopg") as container:
         yield container.get_connection_url()
 
 
