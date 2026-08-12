@@ -16,6 +16,7 @@ import structlog
 
 from pipeline import __version__
 from pipeline.config import Settings
+from pipeline.db import build_engine
 from pipeline.discover import build_manifest
 
 logger = structlog.get_logger(__name__)
@@ -138,10 +139,8 @@ def _resolve_contested(settings: Settings, args: argparse.Namespace) -> int:
     from pipeline.contested import find_contested, resolve_contested  # noqa: PLC0415
 
     if args.dry_run:
-        from sqlalchemy import create_engine  # noqa: PLC0415
-
         books = find_contested(
-            create_engine(settings.database_url),
+            build_engine(settings.database_url),
             minimum_conflicts=args.min_conflicts,
             limit=args.limit,
         )

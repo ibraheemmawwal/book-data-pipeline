@@ -10,9 +10,10 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine
 
 from pipeline.config import Settings
+from pipeline.db import build_engine
 from pipeline.messaging.kafka import KafkaSink, KafkaSource
 from pipeline.models.events import PartitionMarker
 from pipeline.observability.markers import freeze_topology, mark_processing
@@ -27,7 +28,7 @@ LOAD_GROUP = "book-pipeline-load"
 
 def build_transform_consumer(settings: Settings, engine: Engine | None = None) -> TransformConsumer:
     """A transform consumer reading books.raw and writing books.clean."""
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
     return TransformConsumer(
         active,
         KafkaSource(settings.kafka_bootstrap_servers, [settings.kafka_raw_topic], TRANSFORM_GROUP),
@@ -42,7 +43,7 @@ def build_transform_consumer(settings: Settings, engine: Engine | None = None) -
 
 def build_load_consumer(settings: Settings, engine: Engine | None = None) -> LoadConsumer:
     """A load consumer reading books.clean and writing the catalogue."""
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
     return LoadConsumer(
         active,
         KafkaSource(settings.kafka_bootstrap_servers, [settings.kafka_clean_topic], LOAD_GROUP),
@@ -62,7 +63,7 @@ def emit_run_boundary(settings: Settings, run_id: UUID, engine: Engine | None = 
     Partition counts come from configuration rather than from the events, so no
     completion path anywhere contains a literal 3.
     """
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
     partitions = settings.kafka_topic_partitions
 
     with active.begin() as connection:

@@ -67,14 +67,14 @@ def contested_resolution() -> None:
         set is empty, which is the normal state of a healthy catalogue, nothing
         downstream needs to happen.
         """
-        from sqlalchemy import create_engine
 
         from pipeline.config import Settings
         from pipeline.contested import find_contested
+        from pipeline.db import build_engine
 
         settings = Settings()
         books = find_contested(
-            create_engine(settings.database_url),
+            build_engine(settings.database_url),
             minimum_conflicts=settings.contested_min_conflicts,
             limit=settings.contested_max_per_run,
         )

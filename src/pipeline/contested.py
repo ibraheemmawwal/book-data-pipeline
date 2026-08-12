@@ -22,9 +22,10 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, text
 
 from pipeline.config import Settings
+from pipeline.db import build_engine
 from pipeline.extract.goodreads import (
     GoodreadsExtractor,
     GoodreadsNotAcceptedError,
@@ -244,7 +245,7 @@ def resolve_contested(
         GoodreadsNotAcceptedError: either gate is unset. Both are deliberate
             acknowledgements, and a targeted run is not a reason to skip them.
     """
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
     report = ContestedReport()
 
     # Before anything observable. A refused run should leave no run row behind

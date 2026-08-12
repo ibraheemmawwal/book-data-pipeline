@@ -194,6 +194,15 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Nothing here defers, so this runs no triggers. It exists because Airflow's
+  # health panel reports a triggerer that has never heartbeated as failed, and
+  # a dashboard showing red for a component nobody is missing trains you to
+  # ignore the panel that is meant to tell you something is wrong.
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    restart: unless-stopped
+
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor

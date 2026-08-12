@@ -194,9 +194,8 @@ def book_ingestion() -> None:
         """
         from pathlib import Path
 
-        from sqlalchemy import create_engine
-
         from pipeline.config import Settings
+        from pipeline.db import build_engine
         from pipeline.discover import build_manifest
         from pipeline.discover.state import (
             dump_key,
@@ -225,7 +224,7 @@ def book_ingestion() -> None:
 
         path = Path(dump["path"])
         key = dump_key(path)
-        engine = create_engine(settings.database_url)
+        engine = build_engine(settings.database_url)
 
         with engine.begin() as connection:
             position = read_position(connection, key)

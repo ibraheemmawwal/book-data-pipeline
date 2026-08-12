@@ -21,9 +21,10 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Connection, Engine, create_engine
+from sqlalchemy import Connection, Engine
 
 from pipeline.config import Settings
+from pipeline.db import build_engine
 from pipeline.discover import read_manifest, stream_candidates
 from pipeline.extract.goodreads import GoodreadsExtractor
 from pipeline.extract.resolver import CatalogueResolver, Resolution
@@ -168,7 +169,7 @@ def run_ingestion(
     that crashed is distinguishable from one that never started.
     """
     report = IngestReport()
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
 
     # Constructed only when both gates allow it, so an unconfigured run never
     # builds a client it must not use.
@@ -239,7 +240,7 @@ def run_resolution_to_sink(
     a source was skipped.
     """
     report = IngestReport()
-    active = engine or create_engine(settings.database_url)
+    active = engine or build_engine(settings.database_url)
 
     goodreads_skip = settings.skip_reason(SourceName.GOODREADS)
     goodreads = GoodreadsExtractor(settings) if goodreads_skip is None else None
