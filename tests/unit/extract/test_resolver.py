@@ -524,3 +524,84 @@ class TestEnrichmentMode:
             outcomes += [a.outcome for a in result.attempts if a.source is SourceName.GOOGLEBOOKS]
 
         assert outcomes.count(Outcome.SKIPPED) >= 2
+
+
+class TestASpentDailyAllowance:
+    """What happens to the rest of the run once a source's day is gone.
+
+    Google's Books API allows a project 1,000 requests a day and will not raise
+    it. Continuing to ask costs one request per candidate to be told the same
+    thing, and those requests come out of tomorrow's allowance if the run
+    crosses midnight — so the source retires for the run instead.
+    """
+
+    @staticmethod
+    def _daily_limit() -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "code": 429,
+                    "errors": [{"domain": "usageLimits", "reason": "dailyLimitExceeded"}],
+                }
+            },
+        )
+
+    @respx.mock
+    async def test_the_source_is_not_asked_again(self, settings: Settings) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        google = respx.get(GB_VOLUMES).mock(return_value=self._daily_limit())
+        resolver = CatalogueResolver(
+            settings.model_copy(update={"googlebooks_api_key": SecretStr("k")})
+        )
+
+        for key in ("a", "b", "c", "d"):
+            await resolver.resolve(candidate(candidate_key=key))
+
+        # Once, for the candidate that discovered it. Without this the four
+        # candidates cost four requests, and a 500-book run costs 500.
+        assert google.call_count == 1
+
+    @respx.mock
+    async def test_later_candidates_record_why(self, settings: Settings) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        respx.get(GB_VOLUMES).mock(return_value=self._daily_limit())
+        resolver = CatalogueResolver(
+            settings.model_copy(update={"googlebooks_api_key": SecretStr("k")})
+        )
+
+        await resolver.resolve(candidate(candidate_key="first"))
+        later = await resolver.resolve(candidate(candidate_key="second"))
+
+        attempt = next(a for a in later.attempts if a.source is SourceName.GOOGLEBOOKS)
+        # A skip with a reason, not silence: a run where Google Books stopped
+        # contributing should say so rather than just thin out.
+        assert attempt.outcome is Outcome.SKIPPED
+
+    @respx.mock
+    async def test_the_other_sources_carry_on(self, settings: Settings) -> None:
+        # One source's allowance ending is not the run ending.
+        respx.get(GB_VOLUMES).mock(return_value=self._daily_limit())
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        openlibrary = respx.get(OL_SEARCH).mock(
+            return_value=httpx.Response(
+                200, json={"docs": [{"key": "/works/OL1W", "title": "Dune"}]}
+            )
+        )
+        resolver = CatalogueResolver(
+            settings.model_copy(update={"googlebooks_api_key": SecretStr("k")})
+        )
+
+        for key in ("a", "b"):
+            result = await resolver.resolve(candidate(candidate_key=key))
+
+        assert openlibrary.call_count == 2
+        assert result.resolved

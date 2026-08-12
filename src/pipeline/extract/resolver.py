@@ -40,6 +40,7 @@ from pipeline.config import Settings
 from pipeline.extract import build_extractor
 from pipeline.extract.base import (
     ExtractionRequest,
+    QuotaExhaustedError,
     Rejected,
     SourceUnavailableError,
 )
@@ -94,6 +95,10 @@ class Budget:
 
     limit: int
     spent: int = 0
+
+    def spend_all(self) -> None:
+        """Retire this budget for the rest of the run."""
+        self.spent = self.limit
 
     def try_spend(self) -> bool:
         if self.spent >= self.limit:
@@ -290,6 +295,23 @@ class CatalogueResolver:
                     )
                 )
                 return
+        except QuotaExhaustedError as error:
+            # The allowance is spent for the day, so the next candidate would
+            # buy the same answer at the price of another request. Burn the
+            # budget instead: every later candidate then skips this source with
+            # a reason, and the remaining allowance survives for the next run.
+            budget.spend_all()
+            result.attempts.append(
+                Attempt(
+                    candidate.candidate_key,
+                    source,
+                    attempt_no,
+                    Outcome.UNAVAILABLE,
+                    str(error),
+                    timer.elapsed_ms,
+                )
+            )
+            return
         except SourceUnavailableError as error:
             result.attempts.append(
                 Attempt(

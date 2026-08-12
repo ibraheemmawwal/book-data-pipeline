@@ -35,7 +35,19 @@ from pipeline.models.domain import RawBook, SourceName
 
 # Status codes worth trying again. Everything else in 4xx is a request we got
 # wrong, and repeating it verbatim will keep being wrong.
+TOO_MANY_REQUESTS = 429
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+# A 429 means two different things and only one is worth waiting for. Per-minute
+# throttling clears in seconds. A daily allowance does not clear until midnight,
+# and every retry against it spends another request from the very allowance that
+# has run out — so five attempts burn the remaining headroom five times faster
+# and cannot succeed. Google's Books API caps a project at 1,000 requests a day
+# and the limit cannot be raised, which makes the difference the whole ballgame.
+_QUOTA_EXHAUSTED_REASONS = frozenset(
+    {"dailylimitexceeded", "dailylimitexceededunreg", "quotaexceeded"}
+)
+
 
 HTTP_ERROR_THRESHOLD = 400
 DEFAULT_MAX_ATTEMPTS = 5
@@ -58,6 +70,37 @@ class SourceUnavailableError(Exception):
         self.source = source
         self.status_code = status_code
         super().__init__(f"{source}: {message}")
+
+
+class QuotaExhaustedError(SourceUnavailableError):
+    """The source's allowance is spent and will not refill on this timescale.
+
+    Distinct from a generic failure so a caller can stop asking for the rest of
+    the run instead of paying one request per candidate to be told the same
+    thing.
+    """
+
+
+def quota_is_exhausted(response: httpx.Response) -> bool:
+    """Whether a 429 is a spent allowance rather than momentary throttling."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+
+    reasons = {
+        str(item.get("reason", "")).lower()
+        for item in error.get("errors", [])
+        if isinstance(item, dict)
+    }
+    reasons.add(str(error.get("status", "")).lower())
+    return bool(reasons & _QUOTA_EXHAUSTED_REASONS)
 
 
 class InvalidSourceRecordError(ValueError):
@@ -253,6 +296,13 @@ async def request_with_retries(  # noqa: PLR0913
                 raise SourceUnavailableError(
                     source,
                     f"{last_detail} is not retryable",
+                    status_code=response.status_code,
+                )
+
+            if response.status_code == TOO_MANY_REQUESTS and quota_is_exhausted(response):
+                raise QuotaExhaustedError(
+                    source,
+                    f"{last_detail}: allowance exhausted, not retrying",
                     status_code=response.status_code,
                 )
 
