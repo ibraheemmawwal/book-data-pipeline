@@ -321,9 +321,12 @@ def book_ingestion() -> None:
             "unresolved": report.unresolved,
             "observations": report.observations,
             "rejected": report.rejected,
-            "books_inserted": 0,
-            "books_updated": 0,
-            "books_unchanged": 0,
+            # No book counts here, and deliberately not zeros. This task
+            # publishes to Kafka; the consumers load, after it has returned.
+            # Reporting "books_inserted: 0" was worse than reporting nothing —
+            # it is indistinguishable from a run that loaded nothing, which is
+            # exactly how it gets read.
+            "loading": "asynchronous: see the load-consumer, counted per book",
             "status": report.status,
             "run_id": str(report.run_id),
             "discovered": discovery["candidates"],
