@@ -73,7 +73,10 @@ services:
       POSTGRES_PASSWORD: catalogue
       POSTGRES_DB: catalogue
     volumes:
-      - catalogue-data:/var/lib/postgresql/data
+      # Mounted at the parent, not .../data: the postgres 18 image owns the
+      # major-version subdirectory beneath it, and mounting .../data directly
+      # makes it refuse to start against a volume an older image created.
+      - catalogue-data:/var/lib/postgresql
     ports:
       - "${CATALOGUE_DB_PORT:-55432}:5432"
     healthcheck:
@@ -89,7 +92,7 @@ services:
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
-      - airflow-data:/var/lib/postgresql/data
+      - airflow-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
       interval: 5s
