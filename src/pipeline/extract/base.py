@@ -345,12 +345,35 @@ class TokenBucket:
         self._interval = 1.0 / rate_per_second
         self._sleep = sleep if sleep is not None else asyncio.sleep
         self._monotonic = monotonic if monotonic is not None else time.monotonic
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
         self._next_allowed: float | None = None
+
+    def _lock_for_this_loop(self) -> asyncio.Lock:
+        """A lock belonging to the loop running now.
+
+        A bucket only limits anything if it is held across calls, and a run
+        opens a new event loop for every batch — so the bucket necessarily
+        outlives the loop its lock was bound to. asyncio.Lock binds lazily, on
+        the first acquire that actually has to *wait*, which is why this
+        survives a sequential probe and dies in production: concurrent
+        candidates contend, the lock binds to the first batch's loop, and the
+        second batch raises "bound to a different event loop".
+
+        Rebinding is safe because only one loop runs at a time. It costs
+        nothing that matters: the limit lives in ``_next_allowed``, which is
+        monotonic wall time and indifferent to which loop observed it, so the
+        spacing still holds across the batch boundary.
+        """
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
 
     async def acquire(self) -> None:
         """Block until another request is permitted."""
-        async with self._lock:
+        async with self._lock_for_this_loop():
             now = self._monotonic()
             if self._next_allowed is not None and now < self._next_allowed:
                 await self._sleep(self._next_allowed - now)

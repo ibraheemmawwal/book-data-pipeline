@@ -21,6 +21,7 @@ import respx
 from pydantic import SecretStr
 
 from pipeline.config import Settings
+from pipeline.extract.base import TokenBucket
 from pipeline.extract.goodreads import GoodreadsExtractor
 from pipeline.extract.openlibrary import OpenLibraryExtractor
 from pipeline.extract.resolver import CatalogueResolver
@@ -190,3 +191,120 @@ class TestGoodreadsStaysOneAtATime:
         await _resolve_batch(resolver, candidates(6), concurrency=6)
 
         assert peak <= 1, f"{peak} concurrent Goodreads requests; it permits one"
+
+
+class TestARunSpansSeveralEventLoops:
+    """The shape production actually runs in.
+
+    run_resolution_to_sink calls asyncio.run once per batch, so a 1000-candidate
+    run opens twenty event loops and the resolver outlives all of them. Every
+    test above runs inside a single loop, which is why they all passed while
+    the second batch of a real run died with "bound to a different event loop".
+
+    Keeping the extractors for the run is what makes the rate limit real; it is
+    also what exposed this. Both have to hold at once.
+    """
+
+    def test_a_contended_limiter_survives_a_new_loop(self) -> None:
+        """The exact production failure, at the level it happens.
+
+        asyncio.Lock binds on the first acquire that has to *wait*, so a
+        sequential probe of two calls passes and tells you nothing. Three
+        concurrent acquires contend, the lock binds, and a second loop then
+        raises. That difference is why this shipped.
+        """
+        bucket = TokenBucket(1.0)
+
+        async def contend() -> None:
+            await asyncio.gather(bucket.acquire(), bucket.acquire(), bucket.acquire())
+
+        asyncio.run(contend())
+        asyncio.run(contend())  # a fresh loop, as every batch gets
+
+    def test_the_spacing_is_not_reset_by_the_new_loop(self) -> None:
+        # Rebinding the lock must not hand the next batch a clean slate: the
+        # allowance already spent has to carry over.
+        now = 0.0
+        grants: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        async def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        bucket = TokenBucket(1.0, sleep=sleep, monotonic=clock)
+
+        async def take_two() -> None:
+            await asyncio.gather(bucket.acquire(), bucket.acquire())
+            grants.append(now)
+
+        asyncio.run(take_two())
+        first = now
+        asyncio.run(take_two())
+
+        assert now - first >= 1.0, "the new loop started spending a budget already gone"
+
+    @respx.mock
+    def test_a_second_batch_does_not_die_on_the_first_batch_s_lock(
+        self, settings: Settings
+    ) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        fast = settings.model_copy(update={"openlibrary_requests_per_second": 1000.0})
+        resolver = CatalogueResolver(fast)
+
+        # Two separate loops, one resolver — exactly what the ingestion loop does.
+        first = asyncio.run(_resolve_batch(resolver, candidates(2), concurrency=2))
+        second = asyncio.run(_resolve_batch(resolver, candidates(2), concurrency=2))
+
+        assert len(first) == 2
+        assert len(second) == 2
+
+    @respx.mock
+    def test_the_rate_limit_still_spans_the_batch_boundary(self, settings: Settings) -> None:
+        """Rebinding the lock must not reset the spacing.
+
+        The limit lives in monotonic wall time, not in the loop, so a new batch
+        may not start by firing a request the previous batch's budget had
+        already spent.
+        """
+        now = 0.0
+        arrivals: list[float] = []
+
+        def clock() -> float:
+            return now
+
+        async def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        respx.get(OL_SEARCH).mock(
+            side_effect=lambda _r: (
+                arrivals.append(now),
+                httpx.Response(200, json={"docs": []}),
+            )[1]
+        )
+        respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+
+        resolver = CatalogueResolver(settings)
+        extractor = OpenLibraryExtractor(settings, sleep=sleep, base_delay=0.0)
+        extractor._bucket._monotonic = clock  # type: ignore[attr-defined]
+        extractor._bucket._sleep = sleep  # type: ignore[attr-defined]
+        resolver._extractors[SourceName.OPENLIBRARY] = extractor
+
+        asyncio.run(_resolve_batch(resolver, candidates(2), concurrency=2))
+        asyncio.run(_resolve_batch(resolver, candidates(2), concurrency=2))
+
+        assert len(arrivals) == 4
+        gaps = [b - a for a, b in pairwise(arrivals)]
+        assert all(gap >= 1.0 for gap in gaps), (
+            f"requests {gaps} apart; the batch boundary reset the limiter"
+        )

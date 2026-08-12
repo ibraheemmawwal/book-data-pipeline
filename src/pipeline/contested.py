@@ -98,21 +98,47 @@ def conflict_count(payloads: list[Any]) -> int:
     return conflicts
 
 
-def find_contested(engine: Engine, *, minimum_conflicts: int, limit: int) -> list[dict[str, Any]]:
+def find_contested(
+    engine: Engine,
+    *,
+    minimum_conflicts: int,
+    limit: int,
+    skip_adjudicated: bool = True,
+) -> list[dict[str, Any]]:
     """Books whose sources conflict on at least ``minimum_conflicts`` fields.
 
     Ordered by conflict count so a bounded run spends its budget on the worst
     records rather than the first ones it happens to see.
+
+    Books that already carry a Goodreads observation are excluded by default,
+    because asking again cannot change the answer. A tie-breaker does not
+    *resolve* a conflict — it adds a third opinion to it, and can raise the
+    conflict count by disagreeing with both. Ranking by conflicts therefore
+    keeps the same handful of books at the top run after run, and a bounded
+    run spends its entire budget re-asking a restricted source about records it
+    already holds. Pass ``skip_adjudicated=False`` to deliberately re-ask, for
+    instance after the parsers have changed.
     """
+    adjudicated = (
+        """
+                  AND NOT EXISTS (
+                      SELECT 1 FROM book_sources AS seen
+                      WHERE seen.book_id = b.id AND seen.source = 'goodreads'
+                  )
+        """
+        if skip_adjudicated
+        else ""
+    )
     with engine.begin() as connection:
         rows = connection.execute(
             text(
-                """
+                f"""
                 SELECT b.id, b.title, b.isbn13, b.identity_key,
                        array_agg(bs.raw_payload) AS payloads,
                        array_agg(DISTINCT bs.source) AS sources
                 FROM books AS b
                 JOIN book_sources AS bs ON bs.book_id = b.id
+                WHERE true {adjudicated}
                 GROUP BY b.id, b.title, b.isbn13
                 HAVING count(DISTINCT bs.source) > 1
                 """
@@ -238,6 +264,7 @@ def resolve_contested(
     minimum_conflicts: int = 2,
     limit: int = 50,
     engine: Engine | None = None,
+    skip_adjudicated: bool = True,
 ) -> ContestedReport:
     """Re-resolve the most contested books through Goodreads.
 
@@ -252,7 +279,12 @@ def resolve_contested(
     # suggesting work was attempted, and the gate is cheap to check.
     GoodreadsExtractor(settings).ensure_accepted()
 
-    books = find_contested(active, minimum_conflicts=minimum_conflicts, limit=limit)
+    books = find_contested(
+        active,
+        minimum_conflicts=minimum_conflicts,
+        limit=limit,
+        skip_adjudicated=skip_adjudicated,
+    )
     report.examined = len(books)
     report.contested = len(books)
 

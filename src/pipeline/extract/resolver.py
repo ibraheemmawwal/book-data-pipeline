@@ -168,10 +168,22 @@ class CatalogueResolver:
         # Goodreads permits one request in flight. That is a per-source rule,
         # not a reason to resolve candidates one at a time, so it is held here
         # rather than by serialising the whole run.
-        self._goodreads_gate = asyncio.Semaphore(1)
+        # Rebound per loop for the same reason as the rate limiters: a run
+        # opens one event loop per batch, and a primitive created here would
+        # belong to whichever loop first awaited it.
+        self._goodreads_gate: asyncio.Semaphore | None = None
+        self._goodreads_gate_loop: asyncio.AbstractEventLoop | None = None
         self._openlibrary_budget = Budget(settings.openlibrary_max_fallback_queries_per_run)
         self._googlebooks_budget = Budget(settings.googlebooks_max_fallback_queries_per_run)
         self._gutendex_budget = Budget(settings.gutendex_max_last_resort_queries_per_run)
+
+    def _goodreads_gate_for_this_loop(self) -> asyncio.Semaphore:
+        """The one-request-in-flight gate, belonging to the running loop."""
+        loop = asyncio.get_running_loop()
+        if self._goodreads_gate is None or self._goodreads_gate_loop is not loop:
+            self._goodreads_gate = asyncio.Semaphore(1)
+            self._goodreads_gate_loop = loop
+        return self._goodreads_gate
 
     def _extractor_for(self, source: SourceName) -> Extractor:
         """The run's extractor for ``source``, built once and kept.
@@ -209,7 +221,7 @@ class CatalogueResolver:
             # One request in flight, whatever else the run is doing. The gate
             # is here rather than around the whole candidate so the documented
             # sources still overlap.
-            async with self._goodreads_gate:
+            async with self._goodreads_gate_for_this_loop():
                 await self._try_goodreads(candidate, result, client)
 
         self._try_retained_discovery(candidate, result)

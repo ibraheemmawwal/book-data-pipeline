@@ -26,7 +26,7 @@ from datetime import timedelta
 from typing import Any
 
 import pendulum
-from airflow.sdk import dag, task
+from airflow.sdk import Param, dag, task
 
 DAG_ID = "contested_resolution"
 
@@ -52,6 +52,40 @@ DEFAULT_ARGS = {
     # record when ingestion and adjudication overlapped.
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
+    params={
+        # Overridable from the trigger page, because the useful value differs
+        # between a scheduled run and someone working through a backlog.
+        "limit": Param(
+            None,
+            type=["null", "integer"],
+            minimum=1,
+            maximum=500,
+            title="Books to adjudicate",
+            description=(
+                "How many contested books to send to the tie-breaker. "
+                "Defaults to PIPELINE_CONTESTED_MAX_PER_RUN."
+            ),
+        ),
+        "min_conflicts": Param(
+            None,
+            type=["null", "integer"],
+            minimum=1,
+            maximum=10,
+            title="Minimum conflicting fields",
+            description="How many fields must disagree before a book qualifies.",
+        ),
+        "readjudicate": Param(
+            False,
+            type="boolean",
+            title="Re-ask about books already adjudicated",
+            description=(
+                "Off by default. A book that already carries a Goodreads "
+                "observation stays contested — the tie-breaker adds an opinion "
+                "rather than removing the disagreement — so without this every "
+                "run would spend its whole budget on the same records."
+            ),
+        ),
+    },
     tags=["catalogue", "quality"],
     doc_md=__doc__,
 )
@@ -59,7 +93,7 @@ def contested_resolution() -> None:
     """Find contested books, adjudicate them, report what changed."""
 
     @task
-    def find_contested_books() -> dict[str, Any]:
+    def find_contested_books(**context: Any) -> dict[str, Any]:
         """Identify the books whose sources conflict.
 
         Makes no external request. Separating the query from the resolution
@@ -73,16 +107,23 @@ def contested_resolution() -> None:
         from pipeline.db import build_engine
 
         settings = Settings()
+        params = context["params"]
+        limit = params.get("limit") or settings.contested_max_per_run
+        minimum = params.get("min_conflicts") or settings.contested_min_conflicts
+        readjudicate = bool(params.get("readjudicate"))
+
         books = find_contested(
             build_engine(settings.database_url),
-            minimum_conflicts=settings.contested_min_conflicts,
-            limit=settings.contested_max_per_run,
+            minimum_conflicts=minimum,
+            limit=limit,
+            skip_adjudicated=not readjudicate,
         )
 
         return {
             "count": len(books),
-            "minimum_conflicts": settings.contested_min_conflicts,
-            "limit": settings.contested_max_per_run,
+            "minimum_conflicts": minimum,
+            "limit": limit,
+            "readjudicate": readjudicate,
             # A sample, not the set: the whole list would put catalogue content
             # into Airflow's metadata database, and the resolution task reads
             # from PostgreSQL anyway.
@@ -115,8 +156,9 @@ def contested_resolution() -> None:
         try:
             report = resolve_contested(
                 settings,
-                minimum_conflicts=settings.contested_min_conflicts,
-                limit=settings.contested_max_per_run,
+                minimum_conflicts=found["minimum_conflicts"],
+                limit=found["limit"],
+                skip_adjudicated=not found["readjudicate"],
             )
         except GoodreadsNotAcceptedError as error:
             # Not a failure. The tie-breaker is optional, and without it the

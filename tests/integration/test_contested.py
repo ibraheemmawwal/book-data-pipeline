@@ -402,3 +402,70 @@ class TestWhenTheTieBreakerMisbehaves:
 
         assert report.unresolved == 1
         assert connection.execute(select(books.c.id)).scalars().all() == before
+
+
+class TestAdjudicatedBooksAreNotAskedAgain:
+    """Why a tie-breaker run must remember what it already asked.
+
+    Goodreads does not *resolve* a conflict — it adds a third opinion to it,
+    and by disagreeing with both documented sources it can raise the conflict
+    count. Ranking by conflicts therefore keeps the same handful of books at
+    the top of every run, and a bounded run spends its entire budget re-asking
+    a restricted source about records it already holds.
+    """
+
+    def _contested_pair(self, engine: Engine, isbn: str) -> None:
+        CatalogueLoader().load(
+            engine,
+            [
+                openlibrary_view(isbn, title="Contested", year="1965", pages=100),
+                googlebooks_view(isbn, title="Contested Other", year="1999", pages=900),
+            ],
+        )
+
+    def _goodreads_answer(self, engine: Engine, isbn: str) -> None:
+        CatalogueLoader().load(
+            engine,
+            [
+                _clean(
+                    RawBook(
+                        source=SourceName.GOODREADS,
+                        source_id=f"gr-{isbn}",
+                        title="Contested",
+                        isbns=[isbn],
+                        raw_payload={"bookId": f"gr-{isbn}", "title": "Contested"},
+                    )
+                )
+            ],
+        )
+
+    def test_a_book_with_a_goodreads_answer_is_dropped(self, engine: Engine) -> None:
+        isbn = "9780000001115"
+        self._contested_pair(engine, isbn)
+        assert find_contested(engine, minimum_conflicts=1, limit=10)
+
+        self._goodreads_answer(engine, isbn)
+
+        assert find_contested(engine, minimum_conflicts=1, limit=10) == [], (
+            "the tie-breaker would be asked about this book again next run"
+        )
+
+    def test_it_still_disagrees_which_is_the_point(self, engine: Engine) -> None:
+        # The book is not excluded because it stopped being contested. It is
+        # excluded because asking again cannot tell us anything new.
+        isbn = "9780000001122"
+        self._contested_pair(engine, isbn)
+        self._goodreads_answer(engine, isbn)
+
+        assert find_contested(engine, minimum_conflicts=1, limit=10, skip_adjudicated=False)
+
+    def test_books_never_asked_about_are_still_found(self, engine: Engine) -> None:
+        # The exclusion must not swallow the backlog it exists to work through.
+        answered, unanswered = "9780000001139", "9780000001146"
+        self._contested_pair(engine, answered)
+        self._contested_pair(engine, unanswered)
+        self._goodreads_answer(engine, answered)
+
+        found = find_contested(engine, minimum_conflicts=1, limit=10)
+
+        assert [b["isbn13"] for b in found] == [unanswered]
