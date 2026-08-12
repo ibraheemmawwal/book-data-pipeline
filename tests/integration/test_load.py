@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, Engine, insert, select, text, update
+from sqlalchemy import Connection, Engine, event, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from pipeline.extract import goodreads, googlebooks, gutendex, openlibrary
@@ -874,3 +874,95 @@ class TestSeriesProvenance:
             loader.load(engine, [_clean(record)])
 
         assert count(connection, series_sources) == 1
+
+
+class TestCostDoesNotScaleWithRichness:
+    """A load must cost the same whether a book has two subjects or fifty.
+
+    This is a correctness property, not a benchmark. The loader once issued two
+    statements per subject and three per author, which is invisible against a
+    local socket at 0.4ms a round trip and ruinous against a managed database
+    at 130ms: a fifty-subject Open Library record cost 112 statements, about
+    fourteen seconds for one book.
+
+    Counting statements rather than timing them keeps the test deterministic
+    and keeps it honest about what actually went wrong — nothing here was slow,
+    there was simply too much of it.
+    """
+
+    @staticmethod
+    def _record(source_id: str, *, subjects_count: int, authors_count: int) -> CleanBook:
+        # The payload is what matters: canonical fields are recomputed by
+        # replaying book_sources.raw_payload, so a thin payload would quietly
+        # measure a thin book however rich the record looked.
+        payload = {
+            "key": f"/works/{source_id}",
+            "title": f"Book {source_id}",
+            "author_name": [f"Author {source_id} {i}" for i in range(authors_count)],
+            "subject": [f"subject {source_id} {i}" for i in range(subjects_count)],
+            "language": ["eng"],
+            "first_publish_year": 1990,
+        }
+        return _clean(openlibrary.map_payload(payload))
+
+    def _statements_to_load(self, engine: Engine, record: CleanBook) -> int:
+        counted = 0
+
+        def count(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal counted
+            counted += 1
+
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            CatalogueLoader().load(engine, [record])
+        finally:
+            event.remove(engine, "before_cursor_execute", count)
+        return counted
+
+    def test_fifty_subjects_cost_no_more_than_two(self, engine: Engine) -> None:
+        modest = self._statements_to_load(
+            engine, self._record("OL1W", subjects_count=2, authors_count=1)
+        )
+        rich = self._statements_to_load(
+            engine, self._record("OL2W", subjects_count=50, authors_count=1)
+        )
+
+        assert rich == modest, (
+            f"{rich} statements for 50 subjects vs {modest} for 2: the per-subject loop is back"
+        )
+
+    def test_many_authors_cost_no_more_than_one(self, engine: Engine) -> None:
+        one = self._statements_to_load(
+            engine, self._record("OL3W", subjects_count=1, authors_count=1)
+        )
+        many = self._statements_to_load(
+            engine, self._record("OL4W", subjects_count=1, authors_count=12)
+        )
+
+        assert many == one, (
+            f"{many} statements for 12 authors vs {one} for 1: the per-author loop is back"
+        )
+
+    def test_the_fixed_cost_stays_in_budget(self, engine: Engine) -> None:
+        """A ceiling on the per-book cost that does not scale away.
+
+        Loose enough not to break on an unrelated statement, tight enough that
+        adding another read per book has to be a decision someone makes on
+        purpose.
+        """
+        used = self._statements_to_load(
+            engine, self._record("OL5W", subjects_count=8, authors_count=2)
+        )
+
+        assert used <= 16, f"{used} statements to load one book"
+
+    def test_a_rich_book_still_loads_everything(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # The batching must not have traded correctness for round trips.
+        CatalogueLoader().load(engine, [self._record("OL6W", subjects_count=50, authors_count=3)])
+
+        assert count(connection, subjects) == 50
+        assert count(connection, book_subjects) == 50
+        assert count(connection, authors_table) == 3
+        assert count(connection, book_authors) == 3

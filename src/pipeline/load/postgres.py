@@ -505,21 +505,26 @@ class CatalogueLoader:
 
         Written only when it changes, so a book whose series did not move keeps
         its ``updated_at`` and the idempotency guarantee holds.
+
+        The names and the stored projection are read together. They were two
+        queries, which is one wasted round trip on every book in the catalogue
+        — including the overwhelming majority that belong to no series at all.
         """
-        names = (
-            connection.execute(
-                select(series.c.name)
-                .select_from(book_series.join(series, book_series.c.series_id == series.c.id))
-                .where(book_series.c.book_id == book_id)
-            )
-            .scalars()
-            .all()
+        current_names = (
+            select(func.array_agg(series.c.name))
+            .select_from(book_series.join(series, book_series.c.series_id == series.c.id))
+            .where(book_series.c.book_id == book_id)
+            .scalar_subquery()
         )
-        projection = series_search_text(list(names))
-        current = connection.execute(
-            select(books.c.series_search_text).where(books.c.id == book_id)
-        ).scalar_one()
-        if projection != current:
+        row = connection.execute(
+            select(books.c.series_search_text, current_names.label("names")).where(
+                books.c.id == book_id
+            )
+        ).one()
+
+        # array_agg over no rows is NULL, not an empty array.
+        projection = series_search_text(list(row.names or []))
+        if projection != row.series_search_text:
             connection.execute(
                 update(books).where(books.c.id == book_id).values(series_search_text=projection)
             )
@@ -527,7 +532,11 @@ class CatalogueLoader:
     def _sync_authors(
         self, connection: Connection, book_id: int, candidates: list[CleanBook]
     ) -> None:
-        """Attach every author any source reported, keeping per-source values."""
+        """Attach every author any source reported, in three statements.
+
+        Same reasoning as ``_sync_subjects``: the per-author upsert was correct
+        and its cost scaled with a number this loader does not control.
+        """
         seen: dict[str, tuple[RawAuthor, SourceName, int]] = {}
         for candidate in candidates:
             for position, author in enumerate(candidate.authors):
@@ -536,75 +545,110 @@ class CatalogueLoader:
                     continue
                 seen.setdefault(normalised, (author, candidate.source, position))
 
-        for normalised, (author, source, position) in seen.items():
-            author_id = self._upsert_author(connection, author, normalised, source)
-            connection.execute(
-                insert(book_authors)
-                .values(book_id=book_id, author_id=author_id, position=position)
-                .on_conflict_do_nothing(index_elements=["book_id", "author_id"])
-            )
+        if not seen:
+            return
 
-    def _upsert_author(
-        self,
-        connection: Connection,
-        author: RawAuthor,
-        normalised: str,
-        source: SourceName,
-    ) -> int:
-        row = connection.execute(
-            insert(authors)
-            .values(
-                name=author.name,
-                normalized_name=normalised,
-                birth_year=author.birth_year,
-                death_year=author.death_year,
-            )
-            .on_conflict_do_update(
+        statement = insert(authors).values(
+            [
+                {
+                    "name": author.name,
+                    "normalized_name": key,
+                    "birth_year": author.birth_year,
+                    "death_year": author.death_year,
+                }
+                for key, (author, _, _) in seen.items()
+            ]
+        )
+        rows = connection.execute(
+            statement.on_conflict_do_update(
                 index_elements=["normalized_name"],
                 # COALESCE so a source that omits a lifespan cannot blank one
                 # another source supplied.
                 set_={
-                    "birth_year": func.coalesce(authors.c.birth_year, author.birth_year),
-                    "death_year": func.coalesce(authors.c.death_year, author.death_year),
+                    "birth_year": func.coalesce(
+                        authors.c.birth_year, statement.excluded.birth_year
+                    ),
+                    "death_year": func.coalesce(
+                        authors.c.death_year, statement.excluded.death_year
+                    ),
                 },
-            )
-            .returning(authors.c.id)
-        ).one()
-        author_id = int(row.id)
+            ).returning(authors.c.id, authors.c.normalized_name)
+        ).all()
+        # DO UPDATE touches every conflicting row, so every key comes back,
+        # including the authors that already existed.
+        author_ids = {str(row.normalized_name): int(row.id) for row in rows}
 
-        if author.source_author_id:
+        connection.execute(
+            insert(book_authors)
+            .values(
+                [
+                    {"book_id": book_id, "author_id": author_ids[key], "position": position}
+                    for key, (_, _, position) in seen.items()
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=["book_id", "author_id"])
+        )
+
+        source_rows = [
+            {
+                "author_id": author_ids[key],
+                "source": source.value,
+                "source_author_id": author.source_author_id,
+                "source_birth_year": author.birth_year,
+                "source_death_year": author.death_year,
+            }
+            for key, (author, source, _) in seen.items()
+            if author.source_author_id
+        ]
+        if source_rows:
+            # DO NOTHING tolerates a duplicate within the same statement, which
+            # DO UPDATE would not: two candidates can name the same source id.
             connection.execute(
                 insert(author_sources)
-                .values(
-                    author_id=author_id,
-                    source=source.value,
-                    source_author_id=author.source_author_id,
-                    source_birth_year=author.birth_year,
-                    source_death_year=author.death_year,
-                )
+                .values(source_rows)
                 .on_conflict_do_nothing(index_elements=["source", "source_author_id"])
             )
-        return author_id
 
     def _sync_subjects(self, connection: Connection, book_id: int, names: Sequence[str]) -> None:
+        """Attach every subject in two statements, whatever the count.
+
+        This was a loop of two statements per subject. A rich Open Library
+        record carries fifty of them, which is a hundred round trips for one
+        book: 0.04s against a local socket and thirteen seconds against a
+        managed database an ocean away. The work was never the problem, the
+        number of times we asked was.
+        """
+        # Deduplicated on the normalised key before it becomes one statement.
+        # A multi-row ON CONFLICT DO UPDATE that names the same key twice fails
+        # outright ("cannot affect row a second time"); the loop this replaces
+        # never noticed because it ran them one at a time.
+        wanted: dict[str, str] = {}
         for name in names:
             normalised = normalise_subject(name)
-            if normalised is None:
-                continue
-            row = connection.execute(
-                insert(subjects)
-                .values(name=name, normalized_name=normalised)
-                .on_conflict_do_update(
-                    index_elements=["normalized_name"],
-                    set_={"normalized_name": normalised},
-                )
-                .returning(subjects.c.id)
-            ).one()
-            connection.execute(
-                insert(book_subjects)
-                .values(book_id=book_id, subject_id=int(row.id))
-                .on_conflict_do_nothing(index_elements=["book_id", "subject_id"])
-            )
+            if normalised is not None:
+                wanted.setdefault(normalised, name)
+
+        if not wanted:
+            return
+
+        statement = insert(subjects).values(
+            [{"name": name, "normalized_name": key} for key, name in wanted.items()]
+        )
+        rows = connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["normalized_name"],
+                # A no-op update rather than DO NOTHING: RETURNING omits the
+                # rows DO NOTHING skipped, and the ids of subjects that already
+                # existed are precisely the ones needed here.
+                set_={"normalized_name": statement.excluded.normalized_name},
+            ).returning(subjects.c.id)
+        ).all()
+
+        connection.execute(
+            insert(book_subjects)
+            .values([{"book_id": book_id, "subject_id": int(row.id)} for row in rows])
+            .on_conflict_do_nothing(index_elements=["book_id", "subject_id"])
+        )
 
 
 def _agree_on_identity(candidates: list[CleanBook], identity_key: str) -> list[CleanBook]:
