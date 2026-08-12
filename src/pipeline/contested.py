@@ -107,7 +107,7 @@ def find_contested(engine: Engine, *, minimum_conflicts: int, limit: int) -> lis
         rows = connection.execute(
             text(
                 """
-                SELECT b.id, b.title, b.isbn13,
+                SELECT b.id, b.title, b.isbn13, b.identity_key,
                        array_agg(bs.raw_payload) AS payloads,
                        array_agg(DISTINCT bs.source) AS sources
                 FROM books AS b
@@ -127,6 +127,7 @@ def find_contested(engine: Engine, *, minimum_conflicts: int, limit: int) -> lis
                     "id": row.id,
                     "title": row.title,
                     "isbn13": row.isbn13,
+                    "identity_key": row.identity_key,
                     "conflicts": count,
                     "sources": list(row.sources),
                 }
@@ -134,6 +135,35 @@ def find_contested(engine: Engine, *, minimum_conflicts: int, limit: int) -> lis
 
     contested.sort(key=lambda item: item["conflicts"], reverse=True)
     return contested[:limit]
+
+
+def _attach_to(cleaned: CleanBook, book: dict[str, Any]) -> CleanBook | None:
+    """Re-key an observation onto an existing book's identity.
+
+    identity_key and isbn13 must move together — a fallback identity with an
+    ISBN present, or an ISBN identity naming a different one, merges the wrong
+    books, which is why the model rejects it.
+
+    Both values here come from the same row, which the loader already wrote
+    consistently, so the pair is reconcilable by construction. The check is
+    kept anyway: it costs nothing and the alternative to noticing a violation
+    is silently merging two different books, which no later query can undo.
+
+    A full re-validation is not available — content_hash is computed, so a
+    dump-and-revalidate round trip rejects its own output.
+    """
+    identity, isbn13 = book["identity_key"], book["isbn13"]
+
+    if identity.startswith("isbn:"):
+        if identity.removeprefix("isbn:") != isbn13:
+            return None
+    elif identity.startswith("fallback:"):
+        if isbn13 is not None:
+            return None
+    else:
+        return None
+
+    return cleaned.model_copy(update={"identity_key": identity, "isbn13": isbn13})
 
 
 async def _resolve_one(extractor: GoodreadsExtractor, client: Any, book: dict[str, Any]) -> Any:
@@ -178,9 +208,24 @@ async def _run(
                 report.unresolved += 1
                 continue
 
+            # Attach the observation to the book it was fetched for, rather
+            # than letting identity resolution decide.
+            #
+            # This is the whole difference between enriching a record and
+            # creating one. The tie-breaker was asked about a *known* book; if
+            # its answer carries no ISBN it derives a fresh fallback identity,
+            # the loader sees an unfamiliar record, and the contested book
+            # quietly gains a duplicate instead of a third source. That is
+            # exactly what happened on the first run: 20 books, 20 duplicates.
+            attached = _attach_to(cleaned, book)
+            if attached is None:
+                report.unresolved += 1
+                report.errors.append(f"could not attach observation for {book['title'][:40]}")
+                continue
+
             report.resolved += 1
             assert report.run_id is not None  # opened before any query
-            outcome = loader.load(engine, [cleaned], run_id=report.run_id)
+            outcome = loader.load(engine, [attached], run_id=report.run_id)
             report.loaded += outcome.records_loaded
     finally:
         await client.aclose()

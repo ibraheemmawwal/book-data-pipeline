@@ -15,10 +15,12 @@ from pipeline.config import Settings
 from pipeline.contested import (
     COMPARABLE_KEYS,
     ContestedReport,
+    _attach_to,
     conflict_count,
     resolve_contested,
 )
 from pipeline.extract.goodreads import GoodreadsNotAcceptedError
+from pipeline.models.domain import CleanBook, SourceName
 
 
 class TestConflictCounting:
@@ -130,3 +132,64 @@ class TestReport:
         report = ContestedReport()
 
         assert (report.queried, report.resolved, report.loaded) == (0, 0, 0)
+
+
+class TestAttachingToTheKnownBook:
+    """Re-keying an observation onto the book it was fetched for.
+
+    This is the difference between enriching a record and creating one. The
+    tie-breaker is asked about a *known* book; if its answer carries no ISBN it
+    derives a fresh fallback identity, the loader sees an unfamiliar record,
+    and the contested book quietly gains a duplicate instead of a third source.
+    That happened on the first live run: 20 books queried, 20 duplicates
+    created, and nothing failed.
+    """
+
+    def _clean(self, **overrides: Any) -> Any:
+        base: dict[str, Any] = {
+            "source": SourceName.GOODREADS,
+            "source_id": "1",
+            "identity_key": "fallback:" + "a" * 64,
+            "title": "Dune",
+            "normalised_title": "dune",
+            "raw_payload": {},
+        }
+        return CleanBook(**{**base, **overrides})
+
+    def test_a_fallback_identity_is_carried_across(self) -> None:
+        target = {"identity_key": "fallback:" + "b" * 64, "isbn13": None, "title": "Dune"}
+
+        attached = _attach_to(self._clean(), target)
+
+        assert attached is not None
+        assert attached.identity_key == target["identity_key"]
+
+    def test_an_isbn_identity_carries_its_isbn_with_it(self) -> None:
+        # They must move together: an identity naming one ISBN while the record
+        # carries another merges the wrong books.
+        target = {
+            "identity_key": "isbn:9780553380163",
+            "isbn13": "9780553380163",
+            "title": "Dune",
+        }
+
+        attached = _attach_to(self._clean(), target)
+
+        assert attached is not None
+        assert attached.isbn13 == "9780553380163"
+        assert attached.identity_key == "isbn:9780553380163"
+
+    def test_an_irreconcilable_pair_is_refused_not_guessed(self) -> None:
+        target = {"identity_key": "isbn:9780553380163", "isbn13": None, "title": "Dune"}
+
+        assert _attach_to(self._clean(), target) is None
+
+    def test_the_observation_keeps_its_own_source(self) -> None:
+        # Re-keying changes which book it describes, not who reported it —
+        # provenance would be a lie otherwise.
+        target = {"identity_key": "fallback:" + "b" * 64, "isbn13": None, "title": "Dune"}
+
+        attached = _attach_to(self._clean(), target)
+
+        assert attached is not None
+        assert attached.source is SourceName.GOODREADS
