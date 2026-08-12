@@ -17,6 +17,7 @@ import pytest
 import pipeline.ingest as ingest_module
 from pipeline import __version__, services
 from pipeline.cli import build_parser, main
+from pipeline.contested import ContestedReport
 
 
 class TestParser:
@@ -222,3 +223,60 @@ class TestConsumerCommands:
 
         with pytest.raises(SystemExit):
             main(["emit-run-boundary"])
+
+
+class TestResolveContestedCommand:
+    """The command that spends a restricted source.
+
+    Thin by design, so what is pinned here is the routing and the dry run —
+    the part an operator uses to see what *would* be queried before anything
+    is.
+    """
+
+    def test_it_reports_what_the_run_did(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _configure(monkeypatch, tmp_path)
+        seen: dict[str, Any] = {}
+
+        def fake(settings: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return ContestedReport(contested=3, queried=3, resolved=2, loaded=2)
+
+        monkeypatch.setattr("pipeline.contested.resolve_contested", fake)
+
+        assert main(["resolve-contested", "--limit", "7", "--min-conflicts", "3"]) == 0
+        assert seen == {"minimum_conflicts": 3, "limit": 7}
+
+    def test_a_dry_run_queries_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The point of --dry-run: see the targets without touching the source.
+
+        A dry run that still resolved would be the one mistake this flag exists
+        to make impossible.
+        """
+        _configure(monkeypatch, tmp_path)
+
+        def refuse(*_a: Any, **_k: Any) -> Any:
+            raise AssertionError("a dry run must not resolve anything")
+
+        monkeypatch.setattr("pipeline.contested.resolve_contested", refuse)
+        monkeypatch.setattr("sqlalchemy.create_engine", lambda *_a, **_k: object())
+        monkeypatch.setattr(
+            "pipeline.contested.find_contested",
+            lambda *_a, **_k: [
+                {"title": "Dune", "conflicts": 3, "sources": ["openlibrary", "googlebooks"]}
+            ],
+        )
+
+        assert main(["resolve-contested", "--dry-run"]) == 0
+
+    def test_a_dry_run_with_nothing_contested_is_still_success(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _configure(monkeypatch, tmp_path)
+        monkeypatch.setattr("sqlalchemy.create_engine", lambda *_a, **_k: object())
+        monkeypatch.setattr("pipeline.contested.find_contested", lambda *_a, **_k: [])
+
+        assert main(["resolve-contested", "--dry-run"]) == 0

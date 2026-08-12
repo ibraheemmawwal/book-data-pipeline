@@ -966,3 +966,79 @@ class TestCostDoesNotScaleWithRichness:
         assert count(connection, book_subjects) == 50
         assert count(connection, authors_table) == 3
         assert count(connection, book_authors) == 3
+
+
+class TestRacesAndOddities:
+    """Paths that only a concurrent writer or a strange record reaches.
+
+    They are covered deliberately rather than left to chance: each one exists
+    because the obvious implementation is wrong, and a path with no test is a
+    path that gets simplified away by someone who cannot see why it is there.
+    """
+
+    def test_a_book_created_between_the_select_and_the_insert_is_adopted(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two workers, one new book.
+
+        The insert says ON CONFLICT DO NOTHING and so returns nothing when the
+        other transaction won the race. Failing the record there would make
+        concurrency a data-loss bug; the loader takes their row instead.
+        """
+        record = gutendex_payload("77")
+        loader = CatalogueLoader()
+        real_execute = Connection.execute
+        planted = {"done": False}
+
+        def racing(self: Connection, statement: Any, *args: Any, **kwargs: Any) -> Any:
+            # Plant the row after the loader has looked and found nothing.
+            if not planted["done"] and "INSERT INTO books" in str(statement):
+                planted["done"] = True
+                with engine.begin() as other:
+                    real_execute(
+                        other,
+                        insert(books).values(
+                            identity_key=record.identity_key,
+                            title="Planted by another worker",
+                            content_hash="",
+                        ),
+                    )
+            return real_execute(self, statement, *args, **kwargs)
+
+        monkeypatch.setattr(Connection, "execute", racing)
+        loader.load(engine, [record])
+        monkeypatch.undo()
+
+        assert count(connection, books) == 1
+
+    def test_an_author_whose_name_normalises_to_nothing_is_skipped(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # A punctuation-only author is not a person; attaching one would put a
+        # row in `authors` that no query could ever sensibly return.
+        record = _clean(
+            openlibrary.map_payload(
+                {
+                    "key": "/works/OL999W",
+                    "title": "Anonymous",
+                    "author_name": ["...", "Ursula K. Le Guin"],
+                    "language": ["eng"],
+                }
+            )
+        )
+
+        CatalogueLoader().load(engine, [record])
+
+        assert count(connection, authors_table) == 1
+
+    def test_a_source_that_already_owns_the_isbn_stays_put(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Reconciliation must notice that the ISBN's owner is this very book,
+        # rather than merging it into itself.
+        isbn = "9780441172719"
+        loader = CatalogueLoader()
+        loader.load(engine, [openlibrary_payload("/works/OL1W", isbns=[isbn])])
+        loader.load(engine, [openlibrary_payload("/works/OL1W", isbns=[isbn])])
+
+        assert count(connection, books) == 1

@@ -193,3 +193,44 @@ class TestAttachingToTheKnownBook:
 
         assert attached is not None
         assert attached.source is SourceName.GOODREADS
+
+
+class TestIdentitiesThatCannotBeAttached:
+    """The pairs that must be refused rather than reconciled.
+
+    identity_key and isbn13 have to move together. A fallback identity holding
+    an ISBN, or an ISBN identity naming a different one, merges two different
+    books — and no later query can tell that it happened.
+    """
+
+    @staticmethod
+    def _observation() -> Any:
+        return CleanBook(
+            source=SourceName.GOODREADS,
+            source_id="1",
+            identity_key="fallback:" + "a" * 64,
+            title="Contested",
+            normalised_title="contested",
+            raw_payload={},
+        )
+
+    def test_an_isbn_identity_naming_a_different_isbn_is_refused(self) -> None:
+        book = {
+            "identity_key": "isbn:9780441172719",
+            "isbn13": "9780553293357",
+            "title": "Mismatched",
+        }
+
+        assert _attach_to(self._observation(), book) is None
+
+    def test_a_fallback_identity_holding_an_isbn_is_refused(self) -> None:
+        book = {"identity_key": "fallback:abc123", "isbn13": "9780441172719", "title": "Wrong"}
+
+        assert _attach_to(self._observation(), book) is None
+
+    def test_an_unrecognised_identity_scheme_is_refused(self) -> None:
+        # Not a guess about what a future scheme might mean: an identity this
+        # code does not understand is one it must not act on.
+        book = {"identity_key": "oclc:12345", "isbn13": None, "title": "Unknown scheme"}
+
+        assert _attach_to(self._observation(), book) is None

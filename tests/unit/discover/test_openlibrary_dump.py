@@ -24,6 +24,7 @@ from pipeline.discover.openlibrary_dump import (
     stream_candidates,
     verify_checksum,
 )
+from pipeline.discover.state import dump_key
 from pipeline.models.domain import CandidateBook
 
 FIXTURE = Path(__file__).parent.parent.parent / "fixtures" / "ol_dump_editions_sample.txt.gz"
@@ -280,3 +281,32 @@ class TestTruncatedDump:
             build_manifest(truncated, out)
 
         assert not out.exists()
+
+
+class TestDumpKey:
+    """Why the key carries the size.
+
+    The published filename is always ``ol_dump_editions_latest`` while its
+    contents change monthly. Keying on the name alone would resume a new dump
+    at the previous one's offset — skipping into unrelated data and calling it
+    progress.
+    """
+
+    def test_it_combines_the_name_and_the_size(self, tmp_path: Path) -> None:
+        path = tmp_path / "ol_dump_editions_latest.txt.gz"
+        path.write_bytes(b"12345")
+
+        assert dump_key(path) == "ol_dump_editions_latest.txt.gz:5"
+
+    def test_a_refreshed_dump_is_a_different_key(self, tmp_path: Path) -> None:
+        path = tmp_path / "ol_dump_editions_latest.txt.gz"
+        path.write_bytes(b"old")
+        before = dump_key(path)
+        path.write_bytes(b"much longer contents")
+
+        assert dump_key(path) != before
+
+    def test_a_missing_file_still_yields_a_key(self, tmp_path: Path) -> None:
+        # Called before the fetch on a first run, so it cannot require the file
+        # to exist.
+        assert dump_key(tmp_path / "absent.txt.gz") == "absent.txt.gz:0"
