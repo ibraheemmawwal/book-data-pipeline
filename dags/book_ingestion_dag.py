@@ -38,7 +38,7 @@ from datetime import timedelta
 from typing import Any
 
 import pendulum
-from airflow.sdk import dag, task
+from airflow.sdk import Param, dag, task
 
 DAG_ID = "book_ingestion"
 
@@ -91,12 +91,57 @@ DEFAULT_ARGS: dict[str, Any] = {
     default_args=DEFAULT_ARGS,
     tags=["catalogue", "etl"],
     doc_md=__doc__,
+    # Rendered as a form on the trigger page. A scheduled run takes every
+    # default; an operator triggering by hand can narrow the run without
+    # editing configuration and restarting the scheduler, which is what
+    # "trigger with config" is for.
+    params={
+        "discovery_source": Param(
+            "openlibrary_dump",
+            type="string",
+            enum=["openlibrary_dump", "gutendex"],
+            title="Discovery source",
+            description=(
+                "Where candidates come from. The Open Library dump is the "
+                "default and the only one with broad coverage of older books; "
+                "Gutendex is public-domain only."
+            ),
+        ),
+        "max_candidates": Param(
+            0,
+            type="integer",
+            minimum=0,
+            maximum=100000,
+            title="Maximum candidates",
+            description="0 uses the configured default.",
+        ),
+        "resume": Param(
+            True,
+            type="boolean",
+            title="Resume from the last position",
+            description=(
+                "On, each run continues through the dump. Off re-reads from the "
+                "beginning — useful after a schema change, and harmless because "
+                "loading is idempotent."
+            ),
+        ),
+        "refresh_dump": Param(
+            False,
+            type="boolean",
+            title="Force a fresh download",
+            description=(
+                "Ignore the cached dump. The cache is refreshed automatically "
+                "when the published file changes, so this is for the case where "
+                "a download was interrupted."
+            ),
+        ),
+    },
 )
 def book_ingestion() -> None:
     """Discover candidates, resolve them, load the catalogue."""
 
     @task
-    def fetch_dump() -> dict[str, Any]:
+    def fetch_dump(**context: Any) -> dict[str, Any]:
         """Obtain the Open Library dump.
 
         Its own task because it is its own failure: a download that times out
@@ -110,9 +155,22 @@ def book_ingestion() -> None:
         from pipeline.config import Settings
         from pipeline.discover.fetch import fetch_dump as fetch
 
+        params = context["params"]
         settings = Settings()
+        destination = settings.openlibrary_dump_path
+
+        if params.get("refresh_dump") and destination and destination.exists():
+            # An interrupted download leaves a file that looks complete to the
+            # size check; removing it is the only way to force a real refetch.
+            destination.unlink()
+
+        if params.get("discovery_source") == "gutendex":
+            # Gutendex publishes no dump. Discovery reads its API directly, so
+            # there is nothing to fetch and saying so beats a silent no-op.
+            return {"path": "", "bytes": 0, "downloaded": False, "reason": "gutendex has no dump"}
+
         result = fetch(
-            settings.openlibrary_dump_path,  # type: ignore[arg-type]
+            destination,  # type: ignore[arg-type]
             max_lines=settings.dump_fetch_max_lines,
         )
         return {
@@ -123,7 +181,7 @@ def book_ingestion() -> None:
         }
 
     @task
-    def discover_candidates(dump: dict[str, Any]) -> dict[str, Any]:
+    def discover_candidates(dump: dict[str, Any], **context: Any) -> dict[str, Any]:
         """Build a candidate manifest, resuming where the last run stopped.
 
         Reading from the beginning every time is what made a scheduled run a
@@ -146,13 +204,36 @@ def book_ingestion() -> None:
             save_position,
         )
 
+        params = context["params"]
         settings = Settings()
+        limit = params.get("max_candidates") or settings.discovery_max_candidates
+
+        if params.get("discovery_source") == "gutendex":
+            from pipeline.discover.gutendex_source import (
+                build_manifest_from_gutendex,
+            )
+
+            written = build_manifest_from_gutendex(
+                settings, settings.discovery_manifest_path, max_candidates=limit
+            )
+            return {
+                "manifest_path": str(settings.discovery_manifest_path),
+                "candidates": written,
+                "source": "gutendex",
+                "status": "success" if written else "failed",
+            }
+
         path = Path(dump["path"])
         key = dump_key(path)
         engine = create_engine(settings.database_url)
 
         with engine.begin() as connection:
             position = read_position(connection, key)
+
+        # Off, the run re-reads from the beginning. Harmless because loading is
+        # idempotent, and the way to re-examine a dump after a schema change.
+        if not params.get("resume", True):
+            position = position.__class__(key, 0, position.candidates_emitted, False)
 
         if position.exhausted:
             # Nothing left in this dump. Not a failure: the next published one
@@ -169,7 +250,7 @@ def book_ingestion() -> None:
             path,
             settings.discovery_manifest_path,
             languages=settings.discovery_language_set(),
-            max_candidates=settings.discovery_max_candidates,
+            max_candidates=limit,
             expected_sha256=settings.openlibrary_dump_sha256,
             start_line=position.line_offset,
         )
@@ -189,6 +270,7 @@ def book_ingestion() -> None:
         return {
             "manifest_path": str(settings.discovery_manifest_path),
             "candidates": written,
+            "source": "openlibrary_dump",
             "resumed_from": position.line_offset,
             "stopped_at": outcome.lines_read,
             "exhausted": outcome.exhausted,

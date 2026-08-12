@@ -37,10 +37,15 @@ x-pipeline-env: &pipeline-env
   # Absent by default. The adapter skips observably rather than failing, which
   # is what keeps a clean clone runnable with no credentials at all.
   PIPELINE_GOOGLEBOOKS_API_KEY: ${PIPELINE_GOOGLEBOOKS_API_KEY:-}
-  # Both false unless deliberately overridden. Goodreads is an unofficial
-  # contract used under an accepted risk; a default clone must never touch it.
-  PIPELINE_GOODREADS_ENABLED: ${PIPELINE_GOODREADS_ENABLED:-false}
-  PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED: ${PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED:-false}
+  # Both true in this stack, which is a deliberate acceptance rather than an
+  # oversight: Goodreads is an unofficial contract used under accepted risk.
+  # They gate the contested-resolution DAG, which asks it only about records
+  # the documented sources disagree on — ingestion does not consult it at all
+  # unless PIPELINE_GOODREADS_IN_RESOLUTION is also set.
+  #
+  # The library defaults stay false, so importing the package never enables it.
+  PIPELINE_GOODREADS_ENABLED: ${PIPELINE_GOODREADS_ENABLED:-true}
+  PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED: ${PIPELINE_GOODREADS_UNOFFICIAL_SOURCE_ACCEPTED:-true}
   PIPELINE_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   PIPELINE_KAFKA_TOPIC_PARTITIONS: ${PIPELINE_KAFKA_TOPIC_PARTITIONS:-3}
 

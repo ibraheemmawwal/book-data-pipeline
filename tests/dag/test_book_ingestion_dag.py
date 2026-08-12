@@ -191,3 +191,44 @@ class TestPhaseTwoShape:
         # onto a topic nothing is consuming.
         assert "resolve_and_load" in dagbag.dags[DAG_ID].task_ids
         assert "emit_run_boundary" not in dagbag.dags[DAG_ID].task_ids
+
+
+class TestTriggerParameters:
+    """The form on the trigger page.
+
+    A scheduled run takes every default; an operator triggering by hand can
+    narrow the run without editing configuration and restarting the scheduler.
+    """
+
+    def test_the_source_can_be_chosen(self, dagbag: Any) -> None:
+        param = dagbag.dags[DAG_ID].params.get_param("discovery_source")
+
+        assert param.schema["enum"] == ["openlibrary_dump", "gutendex"]
+
+    def test_the_dump_is_the_default_source(self, dagbag: Any) -> None:
+        """It is the only source with coverage of the last century.
+
+        Gutendex is public-domain only, so defaulting to it would silently
+        restrict the catalogue to books published before about 1929.
+        """
+        assert dagbag.dags[DAG_ID].params["discovery_source"] == "openlibrary_dump"
+
+    def test_resuming_is_the_default(self, dagbag: Any) -> None:
+        # Otherwise every manual trigger re-reads the dump from the beginning,
+        # which is the behaviour the discovery position exists to prevent.
+        assert dagbag.dags[DAG_ID].params["resume"] is True
+
+    def test_a_forced_refetch_is_opt_in(self, dagbag: Any) -> None:
+        # The cache refreshes itself when the published dump changes; forcing
+        # it re-downloads gigabytes for nothing.
+        assert dagbag.dags[DAG_ID].params["refresh_dump"] is False
+
+    def test_zero_candidates_means_use_the_configured_default(self, dagbag: Any) -> None:
+        assert dagbag.dags[DAG_ID].params["max_candidates"] == 0
+
+    def test_the_candidate_cap_is_bounded(self, dagbag: Any) -> None:
+        # A typo on the trigger page should not start a run that reads the
+        # whole dump in one pass.
+        param = dagbag.dags[DAG_ID].params.get_param("max_candidates")
+
+        assert param.schema["maximum"] <= 100000
