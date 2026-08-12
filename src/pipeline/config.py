@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     # source whose guidance points at dumps for volume.
     openlibrary_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
 
+    # How many candidates may be resolved at once. Each source's published rate
+    # is enforced separately by a limiter held for the run, so this bounds how
+    # much latency overlaps rather than how fast any source is asked. Eight is
+    # enough to keep a 1/second source saturated when a call takes ~3 seconds;
+    # higher just queues on the limiter.
+    resolution_concurrency: Annotated[int, Field(ge=1, le=32)] = 8
+
     # --- Candidate discovery ------------------------------------------------
     # A pinned dump and its digest. Discovery is only reproducible against a
     # known input, so an unpinned checksum is allowed but is a deliberate

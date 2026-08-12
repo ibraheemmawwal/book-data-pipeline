@@ -28,6 +28,7 @@ Every attempt is recorded, including the ones that were skipped and why.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from pipeline.config import Settings
 from pipeline.extract import build_extractor
 from pipeline.extract.base import (
     ExtractionRequest,
+    Extractor,
     QuotaExhaustedError,
     Rejected,
     SourceUnavailableError,
@@ -156,9 +158,32 @@ class CatalogueResolver:
         self._settings = settings
         self._clock = clock or time.monotonic
         self._goodreads = goodreads
+        # One extractor per source for the whole run, because that is the only
+        # scope at which a rate limiter means anything. Rebuilding it per
+        # attempt gave every call a fresh TokenBucket with nothing to remember,
+        # so the limit was never enforced — sequential resolution was the only
+        # thing keeping this polite, which made politeness a property of the
+        # loop shape rather than of the code that claims to provide it.
+        self._extractors: dict[SourceName, Extractor] = {}
+        # Goodreads permits one request in flight. That is a per-source rule,
+        # not a reason to resolve candidates one at a time, so it is held here
+        # rather than by serialising the whole run.
+        self._goodreads_gate = asyncio.Semaphore(1)
         self._openlibrary_budget = Budget(settings.openlibrary_max_fallback_queries_per_run)
         self._googlebooks_budget = Budget(settings.googlebooks_max_fallback_queries_per_run)
         self._gutendex_budget = Budget(settings.gutendex_max_last_resort_queries_per_run)
+
+    def _extractor_for(self, source: SourceName) -> Extractor:
+        """The run's extractor for ``source``, built once and kept.
+
+        Each fetch still opens its own HTTP client; what is shared is the rate
+        limiter, which is the part that has to outlive a single call.
+        """
+        extractor = self._extractors.get(source)
+        if extractor is None:
+            extractor = build_extractor(source, self._settings)
+            self._extractors[source] = extractor
+        return extractor
 
     @property
     def budgets(self) -> dict[SourceName, Budget]:
@@ -181,7 +206,11 @@ class CatalogueResolver:
         # means asking it about every book, and that is the thing its terms do
         # not support.
         if self._settings.goodreads_in_resolution:
-            await self._try_goodreads(candidate, result, client)
+            # One request in flight, whatever else the run is doing. The gate
+            # is here rather than around the whole candidate so the documented
+            # sources still overlap.
+            async with self._goodreads_gate:
+                await self._try_goodreads(candidate, result, client)
 
         self._try_retained_discovery(candidate, result)
 
@@ -275,7 +304,7 @@ class CatalogueResolver:
             return
 
         timer = _Timer(self._clock)
-        extractor = build_extractor(source, self._settings)
+        extractor = self._extractor_for(source)
         request = ExtractionRequest(max_records=1, query=candidate.lookup_query())
 
         try:

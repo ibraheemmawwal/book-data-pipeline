@@ -102,14 +102,31 @@ def candidate_source(settings: Settings, limit: int | None) -> Iterator[Candidat
 
 
 async def _resolve_batch(
-    resolver: CatalogueResolver, batch: list[CandidateBook]
+    resolver: CatalogueResolver, batch: list[CandidateBook], *, concurrency: int
 ) -> list[Resolution]:
-    """Resolve a batch one candidate at a time.
+    """Resolve a batch with a bounded number of candidates in flight.
 
-    Sequential on purpose: Goodreads permits one request in flight, and
-    resolving concurrently would breach that from the very first candidate.
+    This was sequential, on the stated grounds that Goodreads permits one
+    request at a time. That rule is real, but serialising every candidate is
+    the wrong place to enforce it: it also serialises Open Library, which is
+    89% of a run's wall clock and perfectly happy to have several requests
+    outstanding as long as they arrive at its published rate.
+
+    What makes this safe is that each source's rate limiter now lives on an
+    extractor held for the whole run, so the published rate is enforced across
+    candidates rather than incidentally by the loop; Goodreads keeps its own
+    one-at-a-time gate inside the resolver.
+
+    Results stay in candidate order, because the run's accounting reads them
+    alongside the batch that produced them.
     """
-    return [await resolver.resolve(candidate) for candidate in batch]
+    gate = asyncio.Semaphore(concurrency)
+
+    async def resolve_one(candidate: CandidateBook) -> Resolution:
+        async with gate:
+            return await resolver.resolve(candidate)
+
+    return list(await asyncio.gather(*(resolve_one(c) for c in batch)))
 
 
 def account_for(
@@ -187,7 +204,9 @@ def run_ingestion(
     try:
         for batch in _batched(candidate_source(settings, limit), RESOLVE_BATCH):
             report.candidates += len(batch)
-            resolutions = asyncio.run(_resolve_batch(resolver, batch))
+            resolutions = asyncio.run(
+                _resolve_batch(resolver, batch, concurrency=settings.resolution_concurrency)
+            )
 
             with active.begin() as connection:
                 clean = account_for(connection, run_id, resolutions, report)
@@ -254,7 +273,9 @@ def run_resolution_to_sink(
     try:
         for batch in _batched(candidate_source(settings, limit), RESOLVE_BATCH):
             report.candidates += len(batch)
-            resolutions = asyncio.run(_resolve_batch(resolver, batch))
+            resolutions = asyncio.run(
+                _resolve_batch(resolver, batch, concurrency=settings.resolution_concurrency)
+            )
 
             events: list[BookEvent] = []
             with active.begin() as connection:
