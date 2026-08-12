@@ -91,27 +91,102 @@ def book_ingestion() -> None:
     """Discover candidates, resolve them, load the catalogue."""
 
     @task
-    def discover_candidates() -> dict[str, Any]:
-        """Build the candidate manifest from the pinned dump.
+    def fetch_dump() -> dict[str, Any]:
+        """Obtain the Open Library dump.
 
-        Returns the manifest path and a count — never candidates. The manifest
-        is the deterministic artefact; passing its contents through XCom would
-        put the dump in the metadata database.
+        Its own task because it is its own failure: a download that times out
+        or serves a truncated file is a different problem from a dump that
+        parses badly, and folding them together makes a network blip look like
+        a data-quality incident.
+
+        The file is cached and only re-fetched when the published one changes,
+        so a nightly run does not move 12 GB to read the next few hundred lines.
         """
         from pipeline.config import Settings
-        from pipeline.discover import build_manifest
+        from pipeline.discover.fetch import fetch_dump as fetch
 
         settings = Settings()
-        written = build_manifest(
+        result = fetch(
             settings.openlibrary_dump_path,  # type: ignore[arg-type]
+            max_lines=settings.dump_fetch_max_lines,
+        )
+        return {
+            "path": str(result.path),
+            "bytes": result.bytes_on_disk,
+            "downloaded": result.downloaded,
+            "reason": result.reason,
+        }
+
+    @task
+    def discover_candidates(dump: dict[str, Any]) -> dict[str, Any]:
+        """Build a candidate manifest, resuming where the last run stopped.
+
+        Reading from the beginning every time is what made a scheduled run a
+        no-op: the same candidates, already held, and the rest of the file never
+        reached. The position is stored per dump and advanced only after the
+        manifest is on disk.
+
+        Returns the manifest path and a count — never candidates. Putting the
+        dump through XCom would put it in the metadata database.
+        """
+        from pathlib import Path
+
+        from sqlalchemy import create_engine
+
+        from pipeline.config import Settings
+        from pipeline.discover import build_manifest
+        from pipeline.discover.state import (
+            dump_key,
+            read_position,
+            save_position,
+        )
+
+        settings = Settings()
+        path = Path(dump["path"])
+        key = dump_key(path)
+        engine = create_engine(settings.database_url)
+
+        with engine.begin() as connection:
+            position = read_position(connection, key)
+
+        if position.exhausted:
+            # Nothing left in this dump. Not a failure: the next published one
+            # gets a different key and starts again.
+            return {
+                "manifest_path": str(settings.discovery_manifest_path),
+                "candidates": 0,
+                "resumed_from": position.line_offset,
+                "exhausted": True,
+                "status": "exhausted",
+            }
+
+        written, outcome = build_manifest(
+            path,
             settings.discovery_manifest_path,
             languages=settings.discovery_language_set(),
             max_candidates=settings.discovery_max_candidates,
             expected_sha256=settings.openlibrary_dump_sha256,
+            start_line=position.line_offset,
         )
+
+        # After the manifest is durable, never before: saving first and then
+        # crashing would skip that slice of the dump forever, with nothing
+        # downstream reporting a gap.
+        with engine.begin() as connection:
+            save_position(
+                connection,
+                key,
+                line_offset=outcome.lines_read,
+                candidates_emitted=written,
+                exhausted=outcome.exhausted,
+            )
+
         return {
             "manifest_path": str(settings.discovery_manifest_path),
             "candidates": written,
+            "resumed_from": position.line_offset,
+            "stopped_at": outcome.lines_read,
+            "exhausted": outcome.exhausted,
             "status": "success" if written else "failed",
         }
 
@@ -185,6 +260,45 @@ def book_ingestion() -> None:
         return {**outcome, "partitions": partitions}
 
     @task
+    def resolve_contested_books() -> dict[str, Any]:
+        """Adjudicate records the documented sources disagree about.
+
+        Its own task because it is a different question from ingestion. Everything
+        before this asks "what do the sources say"; this asks "which of them is
+        right where they conflict", and only for the minority where they do.
+
+        A no-op unless the Goodreads gates are set. Running it on a schedule
+        moves when that decision is checked, not whether it is — and the bound
+        is per run, so a nightly pipeline queries the same small number each
+        time rather than accumulating.
+        """
+        from pipeline.config import Settings
+        from pipeline.contested import resolve_contested
+        from pipeline.extract.goodreads import GoodreadsNotAcceptedError
+
+        settings = Settings()
+        if not settings.resolve_contested_enabled:
+            return {"skipped": "disabled", "queried": 0}
+
+        try:
+            report = resolve_contested(
+                settings,
+                minimum_conflicts=settings.contested_min_conflicts,
+                limit=settings.contested_max_per_run,
+            )
+        except GoodreadsNotAcceptedError as error:
+            # Not a failure. The tie-breaker is optional and its absence leaves
+            # the catalogue exactly as the documented sources described it.
+            return {"skipped": str(error)[:120], "queried": 0}
+
+        return {
+            "contested": report.contested,
+            "queried": report.queried,
+            "resolved": report.resolved,
+            "loaded": report.loaded,
+        }
+
+    @task
     def assess_extraction(discovery: dict[str, Any], outcome: dict[str, Any]) -> str:
         """Decide whether the run produced a usable catalogue.
 
@@ -226,7 +340,8 @@ def book_ingestion() -> None:
         )
         return {"status": status, **outcome}
 
-    discovery = discover_candidates()
+    dump = fetch_dump()
+    discovery = discover_candidates(dump)
 
     if KAFKA_MODE:
         outcome = resolve_and_produce(discovery)
@@ -234,11 +349,20 @@ def book_ingestion() -> None:
         # The boundary is emitted only after the run is judged worth
         # continuing: closing a topic for a run that resolved nothing would
         # hand the consumers an empty run to finalise.
-        emit_run_boundary(outcome).set_upstream(status)
+        boundary = emit_run_boundary(outcome)
+        boundary.set_upstream(status)
+        # Tie-breaking runs last and downstream of the boundary, because it
+        # reads what the consumers wrote. Started earlier it would adjudicate a
+        # catalogue the current run had not finished writing.
+        # No data dependency — it reads the catalogue, not the previous
+        # task's return. Taking an argument it never used would have
+        # implied one and drawn a misleading edge.
+        resolve_contested_books().set_upstream(boundary)
     else:
         outcome = resolve_and_load(discovery)
         status = assess_extraction(discovery, outcome)
-        finalise_run(status, outcome)
+        finalised = finalise_run(status, outcome)
+        resolve_contested_books().set_upstream(finalised)
 
 
 book_ingestion()

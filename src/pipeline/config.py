@@ -130,6 +130,18 @@ class Settings(BaseSettings):
     # disagreement can exist to be reported. It costs one query per candidate
     # per source, bounded by the same per-run budgets, so it is a deliberate
     # spend rather than a default.
+    # How much of the published dump to pull. None fetches all ~12 GB, which
+    # is right for a real deployment and absurd for a demo; a slice is genuine
+    # dump records either way.
+    dump_fetch_max_lines: int | None = None
+
+    # Contested re-resolution runs as part of the pipeline. It still refuses
+    # unless the Goodreads gates are set, so this being on changes when the
+    # decision is checked, not whether it is.
+    resolve_contested_enabled: bool = True
+    contested_min_conflicts: Annotated[int, Field(ge=1)] = 2
+    contested_max_per_run: Annotated[int, Field(ge=0)] = 25
+
     enrich_from_documented_sources: bool = False
 
     googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500

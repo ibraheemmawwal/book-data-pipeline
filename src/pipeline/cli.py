@@ -84,7 +84,7 @@ def _discover(settings: Settings, args: argparse.Namespace) -> int:
         logger.error("cli.no_dump", hint="pass --dump or set PIPELINE_OPENLIBRARY_DUMP_PATH")
         return 2
 
-    written = build_manifest(
+    written, _outcome = build_manifest(
         Path(dump),
         args.out or settings.discovery_manifest_path,
         languages=settings.discovery_language_set(),

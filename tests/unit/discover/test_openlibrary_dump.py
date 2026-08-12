@@ -187,7 +187,7 @@ class TestManifest:
     def test_building_writes_every_candidate(self, tmp_path: Path) -> None:
         out = tmp_path / "manifest.jsonl"
 
-        written = build_manifest(FIXTURE, out)
+        written, _ = build_manifest(FIXTURE, out)
 
         assert written == len(list(stream_candidates(FIXTURE)))
         assert out.exists()
@@ -222,7 +222,7 @@ class TestManifest:
         out = tmp_path / "manifest.jsonl"
         digest = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
 
-        assert build_manifest(FIXTURE, out, expected_sha256=digest) > 0
+        assert build_manifest(FIXTURE, out, expected_sha256=digest)[0] > 0
         assert out.exists()
 
     def test_an_existing_manifest_is_replaced_atomically(self, tmp_path: Path) -> None:

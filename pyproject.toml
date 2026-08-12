@@ -98,6 +98,13 @@ select = [
 # main() is a command dispatcher: one return per subcommand is the clearest
 # shape, and a lookup table would hide the argument handling each one needs.
 "src/pipeline/cli.py" = ["PLR0911"]
+# A TaskFlow DAG is one function holding every task body. Splitting it to
+# satisfy a statement count would scatter the graph across modules and make
+# the shape harder to read, which is the opposite of the point.
+"dags/book_ingestion_dag.py" = ["PLR0915"]
+# build_manifest's parameters are the discovery contract: source, destination,
+# filter, cap, checksum, resume point. Grouping them hides the contract.
+"src/pipeline/discover/openlibrary_dump.py" = ["PLR0913"]
 # confluent_kafka and the broker container are imported inside tests so the
 # module still collects (and skips) when the client is not installed.
 "tests/integration/test_kafka_broker.py" = ["PLC0415"]

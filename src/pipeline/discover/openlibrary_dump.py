@@ -24,6 +24,7 @@ import gzip
 import hashlib
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -167,11 +168,22 @@ def _lines(handle: Any, path: Path) -> Iterator[str]:
         raise TruncatedDumpError(msg) from error
 
 
+@dataclass
+class StreamOutcome:
+    """Where a streaming pass stopped, so the next one can resume."""
+
+    lines_read: int = 0
+    candidates: int = 0
+    exhausted: bool = False
+
+
 def stream_candidates(
     path: Path,
     *,
     languages: frozenset[str] | None = None,
     max_candidates: int | None = None,
+    start_line: int = 0,
+    outcome: StreamOutcome | None = None,
 ) -> Iterator[CandidateBook]:
     """Stream resolvable candidates out of a gzipped dump.
 
@@ -181,14 +193,34 @@ def stream_candidates(
     Records with no language are kept even when filtering. Most of the dump has
     no language field, and dropping those would discard the majority of the
     catalogue to enforce a constraint the record never stated.
+
+    ``start_line`` skips lines already read by an earlier pass. Skipping still
+    decompresses them — a gzip stream has nothing to seek to — but it costs a
+    read rather than a resolution, and resolution is where the expense is.
+
+    ``outcome`` is filled in as the pass proceeds so the caller can record where
+    to resume. It is mutated rather than returned because this is a generator:
+    a return value would only arrive after the caller had finished consuming,
+    which is exactly when a crash would lose it.
     """
     emitted = 0
     skipped = 0
+    seen = 0
+    tally = outcome if outcome is not None else StreamOutcome()
 
     with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
         for line in _lines(handle, path):
+            # The cap is checked before the line is counted. Counting first
+            # would record this line as read when it was never examined, and
+            # the next run would resume past it — losing exactly one record at
+            # every pass boundary, silently, with every count still adding up.
             if max_candidates is not None and emitted >= max_candidates:
                 break
+
+            seen += 1
+            tally.lines_read = seen
+            if seen <= start_line:
+                continue
 
             columns = line.rstrip("\n").split("\t")
             if len(columns) != DUMP_COLUMNS or columns[0] != EDITION_TYPE:
@@ -220,6 +252,10 @@ def stream_candidates(
             emitted += 1
             yield candidate
 
+    tally.candidates = emitted
+    # Exhausted means the file ran out, not that the cap was reached. Only
+    # the former should stop a scheduled pipeline from looking again.
+    tally.exhausted = max_candidates is None or emitted < max_candidates
     logger.info("discovery.stream_complete", emitted=emitted, skipped=skipped)
 
 
@@ -230,7 +266,8 @@ def build_manifest(
     languages: frozenset[str] | None = None,
     max_candidates: int | None = None,
     expected_sha256: str | None = None,
-) -> int:
+    start_line: int = 0,
+) -> tuple[int, StreamOutcome]:
     """Materialise a deterministic candidate manifest.
 
     Written to a temporary file beside the target and renamed only after the
@@ -238,7 +275,8 @@ def build_manifest(
     the next one to mistake for a good manifest. ``os.replace`` is atomic on
     the same filesystem, which is why the temporary file is a sibling.
 
-    Returns the number of candidates written.
+    Returns the number written and where the pass stopped, so a caller can
+    resume from there rather than re-reading the file.
 
     Raises:
         ChecksumMismatchError: ``expected_sha256`` was given and did not match.
@@ -247,10 +285,15 @@ def build_manifest(
     temporary = manifest_path.with_suffix(manifest_path.suffix + ".partial")
 
     written = 0
+    outcome = StreamOutcome()
     try:
         with temporary.open("w", encoding="utf-8") as out:
             for candidate in stream_candidates(
-                path, languages=languages, max_candidates=max_candidates
+                path,
+                languages=languages,
+                max_candidates=max_candidates,
+                start_line=start_line,
+                outcome=outcome,
             ):
                 # sort_keys so the same dump always yields byte-identical
                 # output; a manifest that shuffled would break reproducibility
@@ -273,7 +316,7 @@ def build_manifest(
         temporary.unlink(missing_ok=True)
 
     logger.info("discovery.manifest_written", path=str(manifest_path), candidates=written)
-    return written
+    return written, outcome
 
 
 def read_manifest(manifest_path: Path) -> Iterator[CandidateBook]:

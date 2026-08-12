@@ -460,3 +460,19 @@ __all__ = [
     "source_runs",
     "subjects",
 ]
+
+
+# Where discovery stopped, per dump. Without it a scheduled run re-reads the
+# same lines forever and never reaches the rest of the file.
+discovery_state = Table(
+    "discovery_state",
+    metadata,
+    # Name plus size: the published dump is always called "latest" and its
+    # contents change monthly, so a name alone would resume into a line
+    # describing a different book.
+    Column("dump_key", Text, primary_key=True),
+    Column("line_offset", BigInteger, nullable=False, server_default="0"),
+    Column("candidates_emitted", BigInteger, nullable=False, server_default="0"),
+    Column("exhausted", Boolean, nullable=False, server_default=text("false")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)

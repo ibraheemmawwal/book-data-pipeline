@@ -56,10 +56,12 @@ class TestSchedulingContract:
 class TestTaskGraph:
     def test_the_tasks_match_the_release_architecture(self, dagbag: Any) -> None:
         assert set(dagbag.dags[DAG_ID].task_ids) == {
+            "fetch_dump",
             "discover_candidates",
             "resolve_and_load",
             "assess_extraction",
             "finalise_run",
+            "resolve_contested_books",
         }
 
     @pytest.mark.parametrize(
@@ -76,8 +78,30 @@ class TestTaskGraph:
 
         assert upstream in task.upstream_task_ids
 
-    def test_nothing_runs_before_discovery(self, dagbag: Any) -> None:
-        assert dagbag.dags[DAG_ID].get_task("discover_candidates").upstream_task_ids == set()
+    def test_nothing_runs_before_the_fetch(self, dagbag: Any) -> None:
+        """Fetching the dump is the root.
+
+        Discovery now depends on it — the pipeline obtains its own input rather
+        than assuming a file appeared.
+        """
+        assert dagbag.dags[DAG_ID].get_task("fetch_dump").upstream_task_ids == set()
+
+    def test_discovery_waits_for_the_dump(self, dagbag: Any) -> None:
+        upstream = dagbag.dags[DAG_ID].get_task("discover_candidates").upstream_task_ids
+
+        assert upstream == {"fetch_dump"}
+
+    def test_tie_breaking_runs_after_the_catalogue_is_written(self, dagbag: Any) -> None:
+        # It adjudicates what the run produced; started earlier it would judge
+        # a catalogue this run had not finished writing.
+        upstream = dagbag.dags[DAG_ID].get_task("resolve_contested_books").upstream_task_ids
+
+        assert upstream == {"finalise_run"}
+
+    def test_tie_breaking_is_last(self, dagbag: Any) -> None:
+        task = dagbag.dags[DAG_ID].get_task("resolve_contested_books")
+
+        assert task.downstream_task_ids == set()
 
 
 class TestTimeouts:
