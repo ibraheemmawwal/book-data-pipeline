@@ -133,7 +133,7 @@ class TestResuming:
         seen: list[str] = []
         offset = 0
         for _ in range(10):
-            written, outcome = build_manifest(dump, manifest, max_candidates=7, start_line=offset)
+            _, outcome = build_manifest(dump, manifest, max_candidates=7, start_line=offset)
             seen += [json.loads(line)["title"] for line in manifest.read_text().splitlines()]
             offset = outcome.lines_read
             if outcome.exhausted:
