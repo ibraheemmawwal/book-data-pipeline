@@ -54,6 +54,8 @@ x-airflow-common: &airflow-common
   volumes:
     - ./dags:/opt/airflow/dags:ro
     - ./tests/fixtures:/samples:ro
+    # Real dump slices live here; see README. Not committed — 86MB+.
+    - ./data:/data:ro
     - airflow-logs:/opt/airflow/logs
     - staging:/staging
   depends_on:

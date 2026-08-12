@@ -28,3 +28,4 @@ staging/
 .DS_Store
 .idea/
 .vscode/
+data/
