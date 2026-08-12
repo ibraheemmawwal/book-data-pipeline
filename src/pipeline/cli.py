@@ -54,6 +54,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     barrier.add_argument("--run-id", required=True, help="The ingestion run UUID.")
 
+    contested = commands.add_parser(
+        "resolve-contested",
+        help="Re-resolve books whose sources disagree, through Goodreads.",
+    )
+    contested.add_argument(
+        "--min-conflicts",
+        type=int,
+        default=2,
+        help="How many fields must disagree before a book is worth re-resolving.",
+    )
+    contested.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Hard cap on books queried. This is the bound that keeps a targeted run targeted.",
+    )
+    contested.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the contested books and make no requests.",
+    )
     return parser
 
 
@@ -112,6 +133,33 @@ def _emit_boundary(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_contested(settings: Settings, args: argparse.Namespace) -> int:
+    """Re-resolve contested books, or just list them."""
+    from pipeline.contested import find_contested, resolve_contested  # noqa: PLC0415
+
+    if args.dry_run:
+        from sqlalchemy import create_engine  # noqa: PLC0415
+
+        books = find_contested(
+            create_engine(settings.database_url),
+            minimum_conflicts=args.min_conflicts,
+            limit=args.limit,
+        )
+        for book in books:
+            logger.info(
+                "contested.candidate",
+                title=book["title"][:60],
+                conflicts=book["conflicts"],
+                sources=book["sources"],
+            )
+        logger.info("contested.dry_run_complete", books=len(books))
+        return 0
+
+    report = resolve_contested(settings, minimum_conflicts=args.min_conflicts, limit=args.limit)
+    logger.info("cli.contested_complete", **vars(report))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command."""
     parser = build_parser()
@@ -128,6 +176,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _consume(settings, "transform")
     if args.command == "load-consumer":
         return _consume(settings, "load")
+    if args.command == "resolve-contested":
+        return _resolve_contested(settings, args)
     if args.command == "emit-run-boundary":
         return _emit_boundary(settings, args)
     return _ingest(settings, args)

@@ -95,6 +95,9 @@ select = [
 # Same reason on the other side: these import Airflow and the DAG module only
 # after importorskip has confirmed the optional dependency is present.
 "tests/dag/*" = ["PLC0415"]
+# main() is a command dispatcher: one return per subcommand is the clearest
+# shape, and a lookup table would hide the argument handling each one needs.
+"src/pipeline/cli.py" = ["PLR0911"]
 # confluent_kafka and the broker container are imported inside tests so the
 # module still collects (and skips) when the client is not installed.
 "tests/integration/test_kafka_broker.py" = ["PLC0415"]
