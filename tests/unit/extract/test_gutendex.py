@@ -288,13 +288,11 @@ class TestItSearchesForTheCandidate:
 
     Without a search term the endpoint returns page one of its default
     listing — the same book every time. That is not a thin result, it is the
-    wrong book: each candidate "resolved" to Gutenberg id 2701, every
-    resolution upserted the same (gutendex, 2701) provenance row, and because
-    that pair is unique the row was reassigned from book to book, folding Moby
-    Dick's metadata into whichever record was processed last.
+    wrong book: every candidate "resolved" to Gutenberg id 2701.
 
-    Two hundred resolved attempts in a live run left exactly one row in
-    book_sources. That is the signature to watch for.
+    Six hundred resolved attempts in live runs left exactly one row in
+    book_sources. That ratio is the signature to watch for: a source reporting
+    resolutions it is not depositing.
     """
 
     @respx.mock

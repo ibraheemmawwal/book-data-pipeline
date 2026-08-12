@@ -62,11 +62,16 @@ class GutendexExtractor:
 
         ``search`` is what makes this a resolver rather than a catalogue reader.
         Without it every candidate got page one of Gutendex's default listing —
-        the same book, Moby Dick, for all of them. Each "resolution" then
-        upserted the same ``(gutendex, 2701)`` provenance row, and because that
-        pair is unique, the row was reassigned from book to book, folding one
-        novel's metadata into whichever record was processed last. Two hundred
-        resolved attempts in a run left exactly one row behind.
+        the same book, Moby Dick, for all of them. Six hundred resolved
+        attempts across runs left exactly one row in ``book_sources``.
+
+        It corrupted nothing, which is worth stating because the shape invites
+        the opposite assumption. The load layer keys on the *record's* own
+        identity, so that observation resolved to its own book every time
+        rather than attaching to the candidate that triggered the lookup. What
+        it cost was the enrichment: five hundred candidates asked Gutendex a
+        question and none of them received an answer about themselves, plus one
+        catalogue entry nothing had asked for.
         """
         url: str | None = f"{self._settings.gutendex_base_url.rstrip('/')}/books"
         first_page: dict[str, Any] = {"page": 1}
