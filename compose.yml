@@ -17,7 +17,11 @@ x-pipeline-env: &pipeline-env
   # real run points this at a downloaded ol_dump_editions_*.txt.gz; see the
   # README. Shipping a default means "clone and trigger the DAG" works without
   # first waiting on a multi-gigabyte download.
-  PIPELINE_OPENLIBRARY_DUMP_PATH: ${PIPELINE_OPENLIBRARY_DUMP_PATH:-/samples/ol_dump_editions_sample.txt.gz}
+  PIPELINE_OPENLIBRARY_DUMP_PATH: ${PIPELINE_OPENLIBRARY_DUMP_PATH:-/data/ol_dump_editions.txt.gz}
+  # A slice by default. The published dump is ~12 GB and fetching all of it to
+  # read the next few hundred lines would be absurd for a local stack; unset
+  # this for a real deployment and the whole file is downloaded once.
+  PIPELINE_DUMP_FETCH_MAX_LINES: ${PIPELINE_DUMP_FETCH_MAX_LINES:-50000}
   PIPELINE_DISCOVERY_MAX_CANDIDATES: ${PIPELINE_DISCOVERY_MAX_CANDIDATES:-500}
   # Absent by default. The adapter skips observably rather than failing, which
   # is what keeps a clean clone runnable with no credentials at all.
@@ -54,8 +58,8 @@ x-airflow-common: &airflow-common
   volumes:
     - ./dags:/opt/airflow/dags:ro
     - ./tests/fixtures:/samples:ro
-    # Real dump slices live here; see README. Not committed — 86MB+.
-    - ./data:/data:ro
+    # Writable: the pipeline fetches its own dump here. Not committed.
+    - ./data:/data
     - airflow-logs:/opt/airflow/logs
     - staging:/staging
   depends_on:
