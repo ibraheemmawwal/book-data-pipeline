@@ -281,3 +281,73 @@ class TestFailure:
 
         with pytest.raises(SourceUnavailableError):
             await collect(extractor)
+
+
+class TestItSearchesForTheCandidate:
+    """Gutendex is a resolver here, not a catalogue reader.
+
+    Without a search term the endpoint returns page one of its default
+    listing — the same book every time. That is not a thin result, it is the
+    wrong book: each candidate "resolved" to Gutenberg id 2701, every
+    resolution upserted the same (gutendex, 2701) provenance row, and because
+    that pair is unique the row was reassigned from book to book, folding Moby
+    Dick's metadata into whichever record was processed last.
+
+    Two hundred resolved attempts in a live run left exactly one row in
+    book_sources. That is the signature to watch for.
+    """
+
+    @respx.mock
+    async def test_the_candidate_query_is_sent(self, settings: Settings) -> None:
+        route = respx.get("https://gutendex.com/books").mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+
+        async for _ in GutendexExtractor(settings).fetch(
+            ExtractionRequest(max_records=1, query="Pride and Prejudice Austen")
+        ):
+            pass
+
+        assert route.called
+        sent = route.calls[0].request.url.params
+        assert sent.get("search") == "Pride and Prejudice Austen", (
+            "no search term: every candidate resolves to the same book"
+        )
+
+    @respx.mock
+    async def test_without_a_query_it_does_not_invent_one(self, settings: Settings) -> None:
+        # Bulk discovery legitimately pages the default listing; only the
+        # resolver path supplies a query.
+        route = respx.get("https://gutendex.com/books").mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+
+        async for _ in GutendexExtractor(settings).fetch(ExtractionRequest(max_records=1)):
+            pass
+
+        assert "search" not in route.calls[0].request.url.params
+
+    @respx.mock
+    async def test_the_next_link_is_followed_as_given(self, settings: Settings) -> None:
+        """The search term must not be re-appended to a paged URL.
+
+        Gutendex bakes the query into ``next``; sending params alongside it
+        would either duplicate them or contradict the page it points at.
+        """
+        respx.get("https://gutendex.com/books").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={
+                        "next": "https://gutendex.com/books?page=2&search=dune",
+                        "results": [],
+                    },
+                ),
+                httpx.Response(200, json={"next": None, "results": []}),
+            ]
+        )
+
+        async for _ in GutendexExtractor(settings).fetch(
+            ExtractionRequest(max_records=50, query="dune")
+        ):
+            pass

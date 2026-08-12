@@ -58,9 +58,23 @@ class GutendexExtractor:
         self._base_delay = base_delay
 
     async def fetch(self, request: ExtractionRequest) -> AsyncIterator[ExtractedItem]:
-        """Yield records and rejections, following ``next`` until the budget runs out."""
+        """Yield records and rejections, following ``next`` until the budget runs out.
+
+        ``search`` is what makes this a resolver rather than a catalogue reader.
+        Without it every candidate got page one of Gutendex's default listing —
+        the same book, Moby Dick, for all of them. Each "resolution" then
+        upserted the same ``(gutendex, 2701)`` provenance row, and because that
+        pair is unique, the row was reassigned from book to book, folding one
+        novel's metadata into whichever record was processed last. Two hundred
+        resolved attempts in a run left exactly one row behind.
+        """
         url: str | None = f"{self._settings.gutendex_base_url.rstrip('/')}/books"
-        params: dict[str, Any] | None = {"page": 1}
+        first_page: dict[str, Any] = {"page": 1}
+        if request.query:
+            first_page["search"] = request.query
+        # Cleared once the API's own ``next`` link takes over: it already
+        # carries the search term and the page number.
+        params: dict[str, Any] | None = first_page
         emitted = 0
 
         async with build_client(
