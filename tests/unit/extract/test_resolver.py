@@ -429,3 +429,95 @@ class TestMissingCredentialHandling:
 
         googlebooks = next(a for a in result.attempts if a.source is SourceName.GOOGLEBOOKS)
         assert googlebooks.outcome is Outcome.SKIPPED
+
+
+class TestEnrichmentMode:
+    """Querying documented sources for a book something already resolved.
+
+    Gap-filling is the right default and it has a consequence worth naming: a
+    book resolved by exactly one source has no cross-source provenance and can
+    never disagree with anything. A catalogue built purely that way cannot
+    answer "do the sources agree", which is the question this pipeline exists
+    to make answerable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mocked(self) -> None:
+        # Enrichment reaches these on purpose, so they must answer.
+        mock_live_fallbacks_empty()
+
+    async def test_by_default_a_resolved_candidate_skips_the_documented_apis(
+        self, settings: Settings
+    ) -> None:
+        resolver = CatalogueResolver(settings)
+        candidate = CandidateBook(
+            candidate_key="/works/OL1W",
+            title="Dune",
+            discovery_payload={"key": "/works/OL1W", "title": "Dune"},
+        )
+
+        result = await resolver.resolve(candidate)
+
+        assert result.resolved
+        googlebooks = [a for a in result.attempts if a.source is SourceName.GOOGLEBOOKS]
+        assert googlebooks == []
+
+    async def test_enrichment_queries_them_anyway(self, settings: Settings) -> None:
+        resolver = CatalogueResolver(
+            settings.model_copy(update={"enrich_from_documented_sources": True})
+        )
+        candidate = CandidateBook(
+            candidate_key="/works/OL1W",
+            title="Dune",
+            discovery_payload={"key": "/works/OL1W", "title": "Dune"},
+        )
+
+        result = await resolver.resolve(candidate)
+
+        assert result.resolved
+        # Attempted, whatever the outcome — the point is that it was tried.
+        assert any(a.source is SourceName.GOOGLEBOOKS for a in result.attempts)
+
+    async def test_enrichment_still_respects_the_budget(self, settings: Settings) -> None:
+        # The budget is what stops enrichment turning one run into a quota
+        # incident; without it this mode would query every source for every
+        # candidate indefinitely.
+        settings = settings.model_copy(
+            update={
+                "enrich_from_documented_sources": True,
+                "googlebooks_max_fallback_queries_per_run": 1,
+            }
+        )
+        resolver = CatalogueResolver(settings)
+
+        outcomes = []
+        for index in range(3):
+            candidate = CandidateBook(
+                candidate_key=f"/works/OL{index}W",
+                title=f"Book {index}",
+                discovery_payload={"key": f"/works/OL{index}W", "title": f"Book {index}"},
+            )
+            result = await resolver.resolve(candidate)
+            outcomes += [a.outcome for a in result.attempts if a.source is SourceName.GOOGLEBOOKS]
+
+        assert outcomes.count(Outcome.SKIPPED) >= 2
+
+    async def test_gutendex_stays_a_last_resort_under_enrichment(self, settings: Settings) -> None:
+        """Enrichment covers the documented APIs, not the public-domain mirror.
+
+        Promoting Gutendex to run on every candidate would quietly turn it back
+        into the bulk source, which is the thing its small budget exists to
+        prevent.
+        """
+        resolver = CatalogueResolver(
+            settings.model_copy(update={"enrich_from_documented_sources": True})
+        )
+        candidate = CandidateBook(
+            candidate_key="/works/OL1W",
+            title="Dune",
+            discovery_payload={"key": "/works/OL1W", "title": "Dune"},
+        )
+
+        result = await resolver.resolve(candidate)
+
+        assert not any(a.source is SourceName.GUTENDEX for a in result.attempts)

@@ -168,10 +168,18 @@ class CatalogueResolver:
         await self._try_goodreads(candidate, result, client)
         self._try_retained_discovery(candidate, result)
 
-        # The documented APIs are for filling gaps, not for re-answering a
-        # question already answered: skip them once anything valid exists, so a
-        # working run does not quietly spend its whole fallback budget.
-        if not result.resolved:
+        # Two modes, and the difference is what the run is for.
+        #
+        # Filling gaps (the default): skip the documented APIs once anything
+        # valid exists, so a working run does not quietly spend its whole
+        # fallback budget re-answering a question already answered.
+        #
+        # Enriching: query them anyway. A book resolved by exactly one source
+        # has no cross-source provenance and cannot disagree with anything, so
+        # a catalogue built purely by gap-filling can never answer "do the
+        # sources agree" — the question this pipeline exists to make possible.
+        # Budgets still bound it.
+        if self._settings.enrich_from_documented_sources or not result.resolved:
             await self._try_live_fallbacks(candidate, result)
 
         # Gutendex only when nothing else produced a record. Its budget is

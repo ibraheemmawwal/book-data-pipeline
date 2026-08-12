@@ -124,6 +124,14 @@ class Settings(BaseSettings):
     googlebooks_max_records: Annotated[int, Field(ge=1)] = 500
     # Kept below the cloud project quota so one upstream outage cannot spend a
     # whole day's allowance in minutes.
+    # Off by default. When set, documented sources are queried even for a
+    # candidate something already resolved — which is the only way a book ends
+    # up with more than one source, and therefore the only way a cross-source
+    # disagreement can exist to be reported. It costs one query per candidate
+    # per source, bounded by the same per-run budgets, so it is a deliberate
+    # spend rather than a default.
+    enrich_from_documented_sources: bool = False
+
     googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
 
     # --- Goodreads (unofficial; see the ADR) --------------------------------
