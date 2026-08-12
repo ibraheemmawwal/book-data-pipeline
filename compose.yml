@@ -9,7 +9,14 @@
 name: book-data-pipeline
 
 x-pipeline-env: &pipeline-env
-  PIPELINE_DATABASE_URL: postgresql+psycopg://catalogue:catalogue@catalogue-db:5432/catalogue
+  # Defaults to the local container so a clean clone runs with no credentials
+  # at all. Override it to point the pipeline at the database the deployed API
+  # actually serves — that one is the source of truth, and a pipeline writing
+  # somewhere else is a pipeline nobody sees the output of.
+  #
+  #   PIPELINE_DATABASE_URL='postgresql+psycopg://…neon.tech/neondb' \
+  #     docker compose --profile kafka up -d
+  PIPELINE_DATABASE_URL: ${PIPELINE_DATABASE_URL:-postgresql+psycopg://catalogue:catalogue@catalogue-db:5432/catalogue}
   PIPELINE_OPENLIBRARY_CONTACT_EMAIL: ${PIPELINE_OPENLIBRARY_CONTACT_EMAIL:-you@example.com}
   PIPELINE_DISCOVERY_MANIFEST_PATH: /staging/candidates.jsonl
   PIPELINE_STAGING_DIR: /staging
@@ -22,6 +29,10 @@ x-pipeline-env: &pipeline-env
   # read the next few hundred lines would be absurd for a local stack; unset
   # this for a real deployment and the whole file is downloaded once.
   PIPELINE_DUMP_FETCH_MAX_LINES: ${PIPELINE_DUMP_FETCH_MAX_LINES:-50000}
+  # Enrichment queries the documented APIs even for books already resolved.
+  # Without it every book has one source, nothing can disagree, and the
+  # contested_resolution DAG has nothing to adjudicate.
+  PIPELINE_ENRICH_FROM_DOCUMENTED_SOURCES: ${PIPELINE_ENRICH_FROM_DOCUMENTED_SOURCES:-true}
   PIPELINE_DISCOVERY_MAX_CANDIDATES: ${PIPELINE_DISCOVERY_MAX_CANDIDATES:-500}
   # Absent by default. The adapter skips observably rather than failing, which
   # is what keeps a clean clone runnable with no credentials at all.
