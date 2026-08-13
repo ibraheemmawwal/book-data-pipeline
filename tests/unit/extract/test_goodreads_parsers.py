@@ -466,3 +466,98 @@ class TestEveryCreditedAuthor:
         </script></head><body></body></html>"""
 
         assert parse_book_detail(markup).authors == ()
+
+
+class TestWhatABookPageYieldsFromAnIdAlone:
+    """The facts an export cannot supply.
+
+    An export of book ids carries no work id, so the editions page — which is
+    keyed on one — is unreachable until a book page names it. That makes the
+    book page the only entry point, and what it gives up decides whether a
+    second request is worth making.
+    """
+
+    PAGE = """<html><head><script type="application/ld+json">
+    {"@type": "Book", "name": "To Kill a Mockingbird", "isbn": "9780060935467",
+     "numberOfPages": 323, "author": [{"@type": "Person", "name": "Harper Lee"}]}
+    </script></head><body>
+    <a href="/work/editions/3275794">All editions</a>
+    <script>{"publicationTime":1148367600000}</script>
+    </body></html>"""
+
+    def test_the_work_id_is_read_from_the_editions_link(self) -> None:
+        assert parse_book_detail(self.PAGE).work_id == "3275794"
+
+    def test_the_isbn_comes_from_json_ld(self) -> None:
+        assert parse_book_detail(self.PAGE).isbn == "9780060935467"
+
+    def test_the_year_comes_from_the_page_state(self) -> None:
+        """JSON-LD carries no date field at all.
+
+        The only date a book page yields is epoch milliseconds in its own
+        state, and it is returned as a year because the same book shows
+        different times across editions — a millisecond implies a precision
+        the source does not have.
+        """
+        assert parse_book_detail(self.PAGE).published == "2006"
+
+    def test_a_page_without_an_editions_link_has_no_work_id(self) -> None:
+        markup = (
+            '<html><head><script type="application/ld+json">{"@type":"Book"}</script></head></html>'
+        )
+
+        assert parse_book_detail(markup).work_id is None
+
+    def test_a_nonsense_timestamp_is_ignored(self) -> None:
+        # A year that cannot be computed is better absent than wrong.
+        markup = (
+            '<html><body><script>{"publicationTime":99999999999999999999}</script></body></html>'
+        )
+
+        assert parse_book_detail(markup).published is None
+
+    def test_a_json_ld_date_is_preferred_when_present(self) -> None:
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "datePublished": "1960-07-11"}</script></head>
+        <body><script>{"publicationTime":1148367600000}</script></body></html>"""
+
+        assert parse_book_detail(markup).published == "1960-07-11"
+
+    def test_everything_is_carried_in_the_payload(self) -> None:
+        # The load layer replays payloads, so anything not stored is lost.
+        payload = parse_book_detail(self.PAGE).payload
+
+        assert payload["work_id"] == "3275794"
+        assert payload["isbn"] == "9780060935467"
+        assert payload["published"] == "2006"
+
+
+class TestThePublisherOnAnEditionsRow:
+    """The shape an editions row actually takes.
+
+    "Published June 1949 by Secker and Warburg" puts the date between the verb
+    and the publisher. Requiring them adjacent matched only the minority of
+    rows that omit a date, so most editions contributed no publisher at all.
+    """
+
+    @staticmethod
+    def _row(text: str) -> str:
+        return f'<div data-testid="editionCell">{text}</div>'
+
+    def test_a_date_between_the_verb_and_the_publisher(self) -> None:
+        edition = parse_first_edition(self._row("Published June 1949 by Secker and Warburg"))
+
+        assert edition.publisher == "Secker and Warburg"
+
+    def test_no_date_still_works(self) -> None:
+        assert parse_first_edition(self._row("Published by Penguin")).publisher == "Penguin"
+
+    def test_the_labelled_form_still_works(self) -> None:
+        assert parse_first_edition(self._row("Publisher: Chilton")).publisher == "Chilton"
+
+    def test_the_date_is_not_swallowed_into_the_name(self) -> None:
+        # The failure a greedier pattern would introduce.
+        edition = parse_first_edition(self._row("Published June 1949 by Secker and Warburg"))
+
+        assert edition.publisher is not None
+        assert "1949" not in edition.publisher

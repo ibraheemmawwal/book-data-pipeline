@@ -91,7 +91,10 @@ _EDITION_DATE = re.compile(
     r"(?:January|February|March|April|May|June|July|August|September|October|"
     r"November|December)\s+(?:\d{1,2},\s*)?\d{4}"
 )
-_EDITION_PUBLISHER = re.compile(r"(?:Published\s+by|Publisher:)\s*(.+)")
+# "Published June 1949 by Secker and Warburg" is the shape an editions row
+# actually takes: the date sits between the verb and the publisher. Requiring
+# them adjacent matched only the minority of rows that omit a date.
+_EDITION_PUBLISHER = re.compile(r"(?:Published(?:\s+[^\n]*?)??\s+by|Publisher:)\s*(.+)")
 
 
 @dataclass(frozen=True, slots=True)

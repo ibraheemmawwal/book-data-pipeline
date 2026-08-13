@@ -931,3 +931,157 @@ class TestASoftBlock:
         async with extractor.build_client() as client:
             assert await extractor.autocomplete(client, "nothing matches this") == []
         assert not extractor.circuit_open
+
+
+class TestCompletingARecordFromABareId:
+    """What an export record needs before it is worth loading.
+
+    A title, its authors and a rating are what an export carries. The year, the
+    ISBN, the page count and the series live on the book's own page, so an id
+    has to become a request.
+    """
+
+    PAGE = """<html><head><script type="application/ld+json">
+    {"@type": "Book", "name": "To Kill a Mockingbird", "isbn": "9780060935467",
+     "numberOfPages": 323, "description": "A tale of Maycomb.",
+     "author": [{"@type": "Person", "name": "Harper Lee"}]}
+    </script></head><body>
+    <a href="/work/editions/3275794">All editions</a>
+    <script>{"publicationTime":1148367600000}</script>
+    </body></html>"""
+
+    THIN = """<html><head><script type="application/ld+json">
+    {"@type": "Book", "name": "Nineteen Eighty-Four", "numberOfPages": 328}
+    </script></head><body><a href="/work/editions/153313">All editions</a></body></html>"""
+
+    EDITIONS = """<html><body><div data-testid="editionCell">
+    Published June 1949 by Secker and Warburg
+    ISBN 9780451524935
+    </div></body></html>"""
+
+    @staticmethod
+    def _observation() -> RawBook:
+        return RawBook(
+            source=SourceName.GOODREADS,
+            source_id="2657",
+            title="To Kill a Mockingbird",
+            raw_payload={"bookId": "2657", "title": "To Kill a Mockingbird"},
+        )
+
+    @respx.mock
+    async def test_a_complete_page_needs_no_second_request(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        """The editions page is worth a request only when the first withheld
+        something. Asking anyway would double the traffic against a source that
+        has asked not to be crawled, for the sake of the minority."""
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=self.PAGE))
+        editions = respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(200, text=self.EDITIONS)
+        )
+
+        async with extractor.build_client() as client:
+            book = await extractor.enrich_by_id(client, self._observation())
+
+        assert book is not None
+        assert book.published == "2006"
+        assert book.isbns == ["9780060935467"]
+        assert book.page_count == 323
+        assert not editions.called, "asked for editions it did not need"
+
+    @respx.mock
+    async def test_a_thin_page_falls_through_to_the_editions(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=self.THIN))
+        editions = respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(200, text=self.EDITIONS)
+        )
+
+        async with extractor.build_client() as client:
+            book = await extractor.enrich_by_id(client, self._observation())
+
+        assert editions.called
+        assert book is not None
+        assert book.isbns == ["9780451524935"]
+        assert book.published == "June 1949"
+
+    @respx.mock
+    async def test_a_blocked_book_page_yields_nothing(self, extractor: GoodreadsExtractor) -> None:
+        # Rather than a record that looks resolved and contains a title.
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text=""))
+
+        async with extractor.build_client() as client:
+            assert await extractor.enrich_by_id(client, self._observation()) is None
+
+    @respx.mock
+    async def test_a_page_with_nothing_to_add_yields_nothing(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(url__regex=BOOK_SHOW).mock(
+            return_value=httpx.Response(200, text="<html><body>no data here at all</body></html>")
+        )
+
+        async with extractor.build_client() as client:
+            assert await extractor.enrich_by_id(client, self._observation()) is None
+
+    async def test_a_record_without_an_id_cannot_be_completed(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        observation = RawBook(source=SourceName.GOODREADS, source_id="x", title="T", raw_payload={})
+        stripped = observation.model_copy(update={"source_id": ""})
+
+        async with extractor.build_client() as client:
+            assert await extractor.enrich_by_id(client, stripped) is None
+
+    @respx.mock
+    async def test_a_blocked_editions_page_keeps_what_the_book_page_gave(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        """The second request failing must not discard the first.
+
+        Enrichment is cumulative: a page count and a description are worth
+        keeping even when the ISBN never arrives.
+        """
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=self.THIN))
+        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(503))
+
+        async with extractor.build_client() as client:
+            book = await extractor.enrich_by_id(client, self._observation())
+
+        assert book is not None
+        assert book.page_count == 328
+        assert book.isbns == []
+
+    @respx.mock
+    async def test_the_book_page_wins_where_both_answer(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # The editions list describes one printing; the book page describes the
+        # book. Where they overlap, the book page is the better claim.
+        page = self.PAGE.replace('"isbn": "9780060935467"', '"isbn": "9780061120084"')
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=page))
+        respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(200, text=self.EDITIONS)
+        )
+
+        async with extractor.build_client() as client:
+            book = await extractor.enrich_by_id(client, self._observation())
+
+        assert book is not None
+        assert book.isbns == ["9780061120084"]
+
+    @respx.mock
+    async def test_a_publisher_from_the_editions_page_is_kept(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=self.THIN))
+        respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(200, text=self.EDITIONS)
+        )
+
+        async with extractor.build_client() as client:
+            book = await extractor.enrich_by_id(client, self._observation())
+
+        assert book is not None
+        assert book.publisher is not None
