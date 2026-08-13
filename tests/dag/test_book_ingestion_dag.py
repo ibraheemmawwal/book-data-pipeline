@@ -57,6 +57,7 @@ class TestTaskGraph:
     def test_the_tasks_match_the_release_architecture(self, dagbag: Any) -> None:
         assert set(dagbag.dags[DAG_ID].task_ids) == {
             "fetch_dump",
+            "check_export",
             "discover_candidates",
             "resolve_and_load",
             "assess_extraction",
@@ -93,10 +94,16 @@ class TestTaskGraph:
         """
         assert "resolve_contested_books" not in dagbag.dags[DAG_ID].task_ids
 
-    def test_discovery_waits_for_the_dump(self, dagbag: Any) -> None:
+    def test_discovery_waits_for_the_dump_and_the_file_check(self, dagbag: Any) -> None:
+        """Both, and the check especially.
+
+        An incompatible export produces an empty manifest, which produces a run
+        that resolves nothing and reports success. Discovery starting before
+        the file has been read would make that hour-long mistake possible again.
+        """
         upstream = dagbag.dags[DAG_ID].get_task("discover_candidates").upstream_task_ids
 
-        assert upstream == {"fetch_dump"}
+        assert upstream == {"fetch_dump", "check_export"}
 
 
 class TestTimeouts:

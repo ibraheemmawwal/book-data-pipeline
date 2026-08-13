@@ -112,10 +112,14 @@ DEFAULT_ARGS: dict[str, Any] = {
         "max_candidates": Param(
             0,
             type="integer",
-            minimum=0,
+            minimum=-1,
             maximum=100000,
             title="Maximum candidates",
-            description="0 uses the configured default.",
+            description=(
+                "0 uses the configured default. Set -1 to read the whole file, "
+                "which only makes sense for an export: the Open Library dump is "
+                "12 GB and would never finish."
+            ),
         ),
         "resume": Param(
             True,
@@ -195,6 +199,48 @@ def book_ingestion() -> None:
         }
 
     @task
+    def check_export(dump: dict[str, Any], **context: Any) -> dict[str, Any]:
+        """Read the export and refuse it if it cannot be ingested.
+
+        Its own task because it is its own question. A file with the wrong
+        shape produces an empty manifest, which produces a run that resolves
+        nothing and reports success — an hour spent to learn that a path was
+        wrong. Answering it first costs a second and says which field is
+        missing and what keys the file actually has.
+
+        Skipped for every other discovery source, because there is no file.
+        """
+        from pathlib import Path
+
+        from airflow.exceptions import AirflowFailException
+
+        from pipeline.discover.goodreads_export import inspect_export
+
+        # Sequenced after the fetch rather than reading from it: the export
+        # has no dump, and this task only needs to run before discovery does.
+        _ = dump
+
+        params = context["params"]
+        if params.get("discovery_source") != "goodreads_export":
+            return {"checked": False, "reason": "not an export run"}
+
+        report = inspect_export(Path(params.get("export_path") or "/data/goodreads_export.json"))
+        if not report.compatible:
+            # Fail here rather than downstream: the message names the file, the
+            # count and the keys it does have, which is what tells an operator
+            # whether they pointed at the wrong file or the right file changed.
+            raise AirflowFailException(report.explain())
+
+        return {
+            "checked": True,
+            "path": str(report.path),
+            "records": report.total,
+            "usable": report.usable,
+            "skipped": report.total - report.usable,
+            "summary": report.explain(),
+        }
+
+    @task
     def discover_candidates(dump: dict[str, Any], **context: Any) -> dict[str, Any]:
         """Build a candidate manifest, resuming where the last run stopped.
 
@@ -219,7 +265,11 @@ def book_ingestion() -> None:
 
         params = context["params"]
         settings = Settings()
-        limit = params.get("max_candidates") or settings.discovery_max_candidates
+        requested = params.get("max_candidates")
+        # -1 is "the whole file". Distinct from 0, which means "use the
+        # configured default": a run that wants everything and a run that
+        # states no preference are different intentions.
+        limit = None if requested == -1 else (requested or settings.discovery_max_candidates)
 
         if params.get("discovery_source") == "goodreads_export":
             from pipeline.discover.goodreads_export import (
@@ -455,7 +505,12 @@ def book_ingestion() -> None:
         return {"status": status, **outcome}
 
     dump = fetch_dump()
+    # Before discovery, not alongside it: an incompatible file should stop the
+    # run in a second rather than produce an empty manifest that resolves
+    # nothing and reports success.
+    checked = check_export(dump)
     discovery = discover_candidates(dump)
+    discovery.set_upstream(checked)
 
     if KAFKA_MODE:
         outcome = resolve_and_produce(discovery)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,80 @@ def to_goodreads_payload(record: dict[str, Any]) -> dict[str, Any] | None:
         "_export": {"source_file": record.get("sourceFile"), "position": record.get("position")},
     }
     return {key: value for key, value in payload.items() if value is not None}
+
+
+@dataclass(frozen=True, slots=True)
+class ExportReport:
+    """What an export file is, before anything tries to resolve it.
+
+    A file that is the wrong shape should say so in seconds, not become an
+    empty run that took an hour and looked like it worked.
+    """
+
+    path: Path
+    total: int = 0
+    usable: int = 0
+    problem: str | None = None
+    missing_id: int = 0
+    missing_title: int = 0
+    sample_keys: tuple[str, ...] = ()
+
+    @property
+    def compatible(self) -> bool:
+        return self.problem is None and self.usable > 0
+
+    def explain(self) -> str:
+        """One line an operator can act on."""
+        if self.problem:
+            return f"{self.path.name}: {self.problem}"
+        if not self.usable:
+            return (
+                f"{self.path.name}: {self.total} records, none usable. "
+                f"{self.missing_id} lack goodreadsId, {self.missing_title} lack title. "
+                f"Keys seen: {', '.join(self.sample_keys) or 'none'}"
+            )
+        return f"{self.path.name}: {self.usable} of {self.total} records usable" + (
+            f", {self.total - self.usable} skipped" if self.total > self.usable else ""
+        )
+
+
+def inspect_export(path: Path) -> ExportReport:
+    """Read an export and report whether it can be ingested.
+
+    Deliberately reads the whole file rather than sampling. A record that
+    breaks the reader is more likely at the end than the beginning — an export
+    is usually appended to — and the file is small enough that certainty costs
+    a second.
+    """
+    if not path.exists():
+        return ExportReport(path=path, problem="file not found")
+
+    try:
+        records = list(_records(path))
+    except json.JSONDecodeError as error:
+        return ExportReport(path=path, problem=f"not valid JSON: {error}")
+    except ValueError as error:
+        return ExportReport(path=path, problem=str(error))
+
+    usable = missing_id = missing_title = 0
+    keys: set[str] = set()
+    for record in records:
+        keys.update(record)
+        if not record.get("goodreadsId"):
+            missing_id += 1
+        elif not str(record.get("title") or "").strip():
+            missing_title += 1
+        else:
+            usable += 1
+
+    return ExportReport(
+        path=path,
+        total=len(records),
+        usable=usable,
+        missing_id=missing_id,
+        missing_title=missing_title,
+        sample_keys=tuple(sorted(keys)[:12]),
+    )
 
 
 def _records(path: Path) -> Iterator[dict[str, Any]]:

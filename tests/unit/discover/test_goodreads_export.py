@@ -17,6 +17,7 @@ import pytest
 
 from pipeline.discover.goodreads_export import (
     build_manifest,
+    inspect_export,
     stream_candidates,
     to_goodreads_payload,
 )
@@ -220,3 +221,74 @@ class TestAuthorParsing:
 
         assert payload is not None
         assert payload["author"] == {}
+
+
+class TestInspectingAnExportBeforeUsingIt:
+    """Whether a file can be ingested, answered in a second.
+
+    A file with the wrong shape produces an empty manifest, which produces a
+    run that resolves nothing and reports success — an hour spent to learn that
+    a path was wrong. The report names the count, the missing field and the
+    keys the file actually has, which is what distinguishes "wrong file" from
+    "right file, changed format".
+    """
+
+    def test_a_good_export_is_compatible(self, tmp_path: Path) -> None:
+        report = inspect_export(export(tmp_path, [record(), record(goodreadsId="2")]))
+
+        assert report.compatible
+        assert (report.total, report.usable) == (2, 2)
+        assert "2 of 2 records usable" in report.explain()
+
+    def test_a_missing_file_says_so(self, tmp_path: Path) -> None:
+        report = inspect_export(tmp_path / "absent.json")
+
+        assert not report.compatible
+        assert "not found" in report.explain()
+
+    def test_a_file_that_is_not_json_says_so(self, tmp_path: Path) -> None:
+        path = tmp_path / "broken.json"
+        path.write_text("{not json at all", encoding="utf-8")
+
+        assert "not valid JSON" in inspect_export(path).explain()
+
+    def test_a_file_of_the_wrong_shape_says_so(self, tmp_path: Path) -> None:
+        path = tmp_path / "scalar.json"
+        path.write_text('"a string"', encoding="utf-8")
+
+        report = inspect_export(path)
+
+        assert not report.compatible
+        assert "expected a list" in report.explain()
+
+    def test_records_missing_the_id_are_named_and_counted(self, tmp_path: Path) -> None:
+        # Which field is missing is the difference between a wrong file and a
+        # format change, so the report says rather than reporting "0 usable".
+        path = export(tmp_path, [record(goodreadsId=None), record(goodreadsId=None)])
+
+        report = inspect_export(path)
+
+        assert not report.compatible
+        assert report.missing_id == 2
+        assert "lack goodreadsId" in report.explain()
+
+    def test_the_keys_it_did_find_are_reported(self, tmp_path: Path) -> None:
+        # So an operator can see it pointed at some other kind of file.
+        path = tmp_path / "other.json"
+        path.write_text(json.dumps([{"isbn": "x", "name": "y"}]), encoding="utf-8")
+
+        report = inspect_export(path)
+
+        assert not report.compatible
+        assert "isbn" in report.explain()
+
+    def test_a_partly_usable_file_is_still_compatible(self, tmp_path: Path) -> None:
+        # A few bad rows are not a reason to refuse 32,000 good ones; they are
+        # skipped and counted.
+        path = export(tmp_path, [record(), {"junk": True}, record(goodreadsId="3")])
+
+        report = inspect_export(path)
+
+        assert report.compatible
+        assert (report.total, report.usable) == (3, 2)
+        assert "1 skipped" in report.explain()
