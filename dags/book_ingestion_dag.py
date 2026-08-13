@@ -231,12 +231,15 @@ def book_ingestion() -> None:
                 msg = f"no export at {export}; mount it or set export_path"
                 raise FileNotFoundError(msg)
 
-            # Resumed by the same mechanism as the dump, keyed on the file: a
-            # 32,000-record export is many runs' work, and starting over each
-            # night would re-resolve the beginning and never reach the end.
+            # Resumed by the same mechanism as the dump, and through the same
+            # connection discipline: a 32,000-record export is many runs' work,
+            # and starting over each night would re-resolve the beginning and
+            # never reach the end.
             key = dump_key(export)
             engine = build_engine(settings.database_url)
-            start = 0 if not params.get("resume", True) else read_position(engine, key)
+            with engine.begin() as connection:
+                position = read_position(connection, key)
+            start = 0 if not params.get("resume", True) else position.line_offset
 
             written = build_from_export(
                 export,
@@ -244,43 +247,20 @@ def book_ingestion() -> None:
                 max_candidates=limit,
                 start_index=start,
             )
+
+            # After the manifest is durable, never before: saving first and
+            # then crashing would skip that slice of the export forever.
             if written:
-                save_position(engine, key, line_offset=start + written, emitted=written)
+                with engine.begin() as connection:
+                    save_position(
+                        connection,
+                        key,
+                        line_offset=start + written,
+                        candidates_emitted=written,
+                        exhausted=False,
+                    )
             return {
-                "manifest": str(settings.discovery_manifest_path),
-                "candidates": written,
-                "source": "goodreads_export",
-                "start_index": start,
-                "status": "success" if written else "exhausted",
-            }
-
-        if params.get("discovery_source") == "goodreads_export":
-            from pipeline.discover.goodreads_export import (
-                build_manifest as build_from_export,
-            )
-
-            export = Path(params.get("export_path") or "/data/goodreads_export.json")
-            if not export.exists():
-                msg = f"no export at {export}; mount it or set export_path"
-                raise FileNotFoundError(msg)
-
-            # Resumed by the same mechanism as the dump, keyed on the file: a
-            # 32,000-record export is many runs' work, and starting over each
-            # night would re-resolve the beginning and never reach the end.
-            key = dump_key(export)
-            engine = build_engine(settings.database_url)
-            start = 0 if not params.get("resume", True) else read_position(engine, key)
-
-            written = build_from_export(
-                export,
-                settings.discovery_manifest_path,
-                max_candidates=limit,
-                start_index=start,
-            )
-            if written:
-                save_position(engine, key, line_offset=start + written, emitted=written)
-            return {
-                "manifest": str(settings.discovery_manifest_path),
+                "manifest_path": str(settings.discovery_manifest_path),
                 "candidates": written,
                 "source": "goodreads_export",
                 "start_index": start,
