@@ -49,6 +49,7 @@ from pipeline.extract.base import (
     build_client,
 )
 from pipeline.extract.goodreads_parsers import (
+    BookDetail,
     clean_html_text,
     is_placeholder_cover,
     is_plausible_isbn_match,
@@ -168,6 +169,22 @@ def _looks_like_challenge(body: str) -> bool:
     return any(marker in lowered for marker in CHALLENGE_MARKERS)
 
 
+def _looks_empty(body: str) -> bool:
+    """Whether a 2xx returned nothing at all.
+
+    Observed live: the same book page that served 849KB minutes earlier began
+    answering 202 with zero bytes once the day's requests added up. Treating
+    that as a successful fetch is how a run reports resolutions it never made —
+    the parser finds no fields, the record degrades to a thin one, and nothing
+    says the source stopped talking to us.
+
+    Empty rather than merely small, deliberately. A legitimate answer can be
+    tiny — an autocomplete miss is two characters — and a threshold generous
+    enough to cover a book page would reject those.
+    """
+    return not body.strip()
+
+
 class GoodreadsExtractor:
     """Resolves one candidate at a time against Goodreads."""
 
@@ -269,6 +286,14 @@ class GoodreadsExtractor:
         if _looks_like_challenge(body):
             self._circuit.trip("challenge page returned")
             raise GoodreadsUnavailableError("challenge page returned")
+        if _looks_empty(body):
+            # A block, not a thin page: stop for the run rather than spend the
+            # rest of it collecting nothing.
+            self._circuit.trip(f"empty body on HTTP {response.status_code}")
+            raise GoodreadsUnavailableError(
+                f"empty body on HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
 
         self._circuit.record_success()
         return body
@@ -447,6 +472,59 @@ class GoodreadsExtractor:
         updates["raw_payload"] = payload
         return observation.model_copy(update=updates)
 
+    async def enrich_by_id(self, client: httpx.AsyncClient, observation: RawBook) -> RawBook | None:
+        """Complete a record we already hold a Goodreads id for.
+
+        An export gives a title, its authors and a rating; it gives no year, no
+        ISBN, no page count and no series. Those live on the book's own page,
+        so a book id has to become two requests to be worth anything.
+
+        The work id is not in the export either — it is only on the book page,
+        as the link to the editions list. So the order is forced: fetch the
+        book page, learn the work id, and only then decide whether the editions
+        page is worth a second request. It is worth one when the book page
+        withheld an ISBN or a year, and not otherwise: most books give both up
+        first time, and asking anyway would double the traffic against a source
+        that has asked not to be crawled for the sake of the minority.
+        """
+        book_id = observation.source_id
+        if not book_id:
+            return None
+
+        try:
+            book_html = await self._get(client, f"/book/show/{book_id}")
+        except GoodreadsUnavailableError:
+            return None
+
+        detail = parse_book_detail(book_html)
+        payload = dict(observation.raw_payload)
+        payload["_detail"] = detail.payload
+        updates = _updates_from_detail(detail)
+
+        if detail.work_id and not (detail.isbn and detail.published):
+            try:
+                work_html = await self._get(
+                    client, f"/work/editions/{detail.work_id}", accept=HTML_ACCEPT
+                )
+            except GoodreadsUnavailableError:
+                work_html = None
+            if work_html is not None:
+                edition = parse_first_edition(work_html)
+                payload["_edition"] = edition.payload
+                if edition.isbn13 and "isbns" not in updates:
+                    updates["isbns"] = [edition.isbn13]
+                if edition.published and "published" not in updates:
+                    updates["published"] = edition.published
+                if edition.publisher:
+                    updates["publisher"] = edition.publisher
+
+        if not updates:
+            logger.warning("goodreads.enrich_by_id_empty", book_id=book_id)
+            return None
+
+        updates["raw_payload"] = payload
+        return observation.model_copy(update=updates)
+
     def build_client(self) -> httpx.AsyncClient:
         """A client identifying itself honestly, with a hard timeout."""
         timeout = self._settings.goodreads_timeout_seconds
@@ -563,6 +641,19 @@ def _candidate_to_raw_book(candidate: dict[str, Any]) -> ExtractedItem:
             rejection_code="invalid_record",
             detail=str(error)[:500],
         )
+
+
+def _updates_from_detail(detail: BookDetail) -> dict[str, Any]:
+    """The fields a book page contributes, as model updates."""
+    candidates: dict[str, Any] = {
+        "description": detail.description,
+        "page_count": detail.page_count,
+        "series": [detail.series] if detail.series is not None else None,
+        "authors": [RawAuthor(name=name) for name in detail.authors] if detail.authors else None,
+        "isbns": [detail.isbn] if detail.isbn else None,
+        "published": detail.published,
+    }
+    return {key: value for key, value in candidates.items() if value}
 
 
 def map_payload(payload: object) -> ExtractedItem:

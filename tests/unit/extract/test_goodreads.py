@@ -880,3 +880,54 @@ class TestTheAcceptHeaderPerEndpoint:
             await extractor.autocomplete(client, "Dune")
 
         assert "application/json" in auto.calls[0].request.headers.get("accept", "")
+
+
+class TestASoftBlock:
+    """A 202 with an empty body.
+
+    Observed live: /book/show/2657 served 849KB, and fifteen minutes later the
+    same URL answered 202 with zero bytes, while /book/auto_complete kept
+    returning results. Goodreads throttles its HTML pages and leaves the JSON
+    endpoint alone.
+
+    Every check in the client passed it: the status is not an error, the body
+    holds no challenge markers, and there is nothing to reject. The parser then
+    finds no fields and the record degrades to a thin one — a resolution the
+    run reports as successful and that contains nothing.
+    """
+
+    @respx.mock
+    async def test_an_empty_body_is_a_block_not_a_thin_page(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text=""))
+
+        async with extractor.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError, match="empty body"):
+                await extractor._get(client, "/book/show/2657")
+
+    @respx.mock
+    async def test_it_stops_the_run(self, extractor: GoodreadsExtractor) -> None:
+        # Spending the rest of a run collecting nothing is the failure mode.
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text="   "))
+
+        async with extractor.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError):
+                await extractor._get(client, "/book/show/2657")
+
+        assert extractor.circuit_open
+
+    @respx.mock
+    async def test_a_small_but_real_answer_is_not_a_block(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        """Empty, not merely small.
+
+        An autocomplete miss is two characters. A threshold generous enough to
+        cover a book page would reject every one of them.
+        """
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=[]))
+
+        async with extractor.build_client() as client:
+            assert await extractor.autocomplete(client, "nothing matches this") == []
+        assert not extractor.circuit_open

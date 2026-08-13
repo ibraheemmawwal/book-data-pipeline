@@ -17,6 +17,7 @@ import html
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -325,6 +326,53 @@ def parse_aria_series(label: str | None) -> tuple[str, Decimal | None] | None:
     return (name, position) if name else None
 
 
+# The only place a book page states its work id, and the work id is what the
+# editions page is keyed on. An export that carries a book id but no work id
+# would otherwise be unable to reach the editions at all.
+_WORK_EDITIONS_LINK = re.compile(r"/work/editions/(\d+)")
+
+# Goodreads publishes the date as epoch milliseconds in the page's own state,
+# not in JSON-LD, which carries no date field of any kind.
+_PUBLICATION_TIME = re.compile(r'"publicationTime"\s*:\s*(\d{10,})')
+
+
+def _work_id(markup: str) -> str | None:
+    """The work id a book page links to, if it links to one."""
+    match = _WORK_EDITIONS_LINK.search(markup)
+    return match.group(1) if match else None
+
+
+def _publication_year(document: dict[str, Any]) -> str | None:
+    """A publication date from JSON-LD, which usually carries none."""
+    for key in ("datePublished", "dateCreated"):
+        text = _as_text(document.get(key))
+        if text:
+            return text
+    return None
+
+
+def _published_from_page_state(markup: str) -> str | None:
+    """The publication year, from epoch milliseconds in the page's own state.
+
+    This is the only date a book page gives up. JSON-LD has no date field at
+    all, and the editions page - which does - is keyed on a work id an export
+    of book ids does not carry. Reading it here is what lets a bare Goodreads
+    id produce a year.
+
+    Returned as a year string because transform parses years, and a
+    millisecond timestamp implies a precision the source does not have: the
+    same book shows different times in different editions.
+    """
+    match = _PUBLICATION_TIME.search(markup)
+    if match is None:
+        return None
+    try:
+        moment = datetime.fromtimestamp(int(match.group(1)) / 1000, tz=UTC)
+    except (ValueError, OSError, OverflowError):
+        return None
+    return str(moment.year)
+
+
 def _json_ld_authors(document: dict[str, Any]) -> tuple[str, ...]:
     """Every author the page credits, in order.
 
@@ -387,6 +435,9 @@ class BookDetail:
     page_count: int | None = None
     series: RawSeriesMembership | None = None
     authors: tuple[str, ...] = ()
+    isbn: str | None = None
+    published: str | None = None
+    work_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -414,6 +465,8 @@ def parse_book_detail(markup: str) -> BookDetail:
     description: str | None = None
     page_count: int | None = None
     authors: tuple[str, ...] = ()
+    isbn: str | None = None
+    published: str | None = None
 
     document = parse_json_ld(markup)
     if document is not None:
@@ -421,6 +474,8 @@ def parse_book_detail(markup: str) -> BookDetail:
         description = clean_html_text(_as_text(document.get("description")))
         page_count = _as_positive_int(document.get("numberOfPages"))
         authors = _json_ld_authors(document)
+        isbn = _as_text(document.get("isbn"))
+        published = _publication_year(document)
 
     tree = HTMLParser(markup)
 
@@ -451,11 +506,25 @@ def parse_book_detail(markup: str) -> BookDetail:
         payload["series_id"] = source_series_id
         break
 
+    if published is None:
+        published = _published_from_page_state(markup)
+
+    work_id = _work_id(markup)
+    if work_id:
+        payload["work_id"] = work_id
+    if isbn:
+        payload["isbn"] = isbn
+    if published:
+        payload["published"] = published
+
     return BookDetail(
         description=description,
         page_count=page_count,
         series=series,
         authors=authors,
+        isbn=isbn,
+        published=published,
+        work_id=work_id,
         payload=payload,
     )
 
