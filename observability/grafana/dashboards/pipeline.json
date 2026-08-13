@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -68,7 +68,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -194,7 +194,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -249,7 +249,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -304,7 +304,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -368,7 +368,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -411,7 +411,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -419,7 +419,8 @@
             "gradientMode": "opacity",
             "showPoints": "never",
             "spanNulls": true
-          }
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -463,7 +464,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -471,7 +472,8 @@
             "gradientMode": "opacity",
             "showPoints": "never",
             "spanNulls": true
-          }
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -541,7 +543,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -713,7 +715,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -721,7 +723,8 @@
             "gradientMode": "opacity",
             "showPoints": "never",
             "spanNulls": true
-          }
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -982,7 +985,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -1038,7 +1041,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "thresholds": {
             "mode": "absolute",
@@ -1214,6 +1217,529 @@
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Resolution",
+      "id": 225,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Latest run: what each source did",
+      "description": "Where a run's wall clock actually goes. 'skipped' with a budget reason is the per-run cap working; 'unavailable' is the source refusing.",
+      "id": 226,
+      "gridPos": {
+        "h": 8,
+        "w": 13,
+        "x": 0,
+        "y": 41
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT source, outcome, count(*) AS attempts, round(avg(duration_ms)) AS avg_ms, round(sum(duration_ms)/1000.0) AS total_s FROM resolution_attempts WHERE run_id = (SELECT run_id FROM resolution_attempts GROUP BY run_id ORDER BY max(observed_at) DESC LIMIT 1) GROUP BY source, outcome ORDER BY sum(duration_ms) DESC NULLS LAST",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Why candidates were skipped",
+      "description": "A source that stops contributing says so here before it shows up as thin coverage.",
+      "id": 227,
+      "gridPos": {
+        "h": 8,
+        "w": 11,
+        "x": 13,
+        "y": 41
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(fallback_reason, outcome) AS reason, count(*) AS n FROM resolution_attempts WHERE run_id = (SELECT run_id FROM resolution_attempts GROUP BY run_id ORDER BY max(observed_at) DESC LIMIT 1) AND outcome IN ('skipped','unavailable') GROUP BY 1 ORDER BY n DESC LIMIT 8",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": false
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Rejections by reason",
+      "description": "Records the pipeline could not use. Empty is the healthy state.",
+      "id": 228,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT stage, rejection_code, count(*) AS n, max(source) AS example_source FROM rejected_records GROUP BY stage, rejection_code ORDER BY n DESC LIMIT 8",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Discovery position",
+      "description": "How far through the dump each run has read. The offset advancing is what makes a scheduled run process new books instead of the same ones.",
+      "id": 229,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT dump_key, line_offset, candidates_emitted, exhausted, updated_at FROM discovery_state ORDER BY updated_at DESC",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Growth",
+      "id": 230,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Authors",
+      "description": "",
+      "id": 231,
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 0,
+        "y": 57
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM authors",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Series",
+      "description": "",
+      "id": 232,
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 3,
+        "y": 57
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Subjects",
+      "description": "",
+      "id": 233,
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 6,
+        "y": 57
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM subjects",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Source records",
+      "description": "",
+      "id": 234,
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 9,
+        "y": 57
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM book_sources",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Catalogue total over time",
+      "description": "Cumulative, so a flat stretch is a stall and a step is a run landing.",
+      "id": 235,
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('hour', created_at) AS time, sum(count(*)) OVER (ORDER BY date_trunc('hour', created_at)) AS books FROM books WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages produced per topic",
+      "description": "Production against the drain rate above: produced higher than drained means the backlog is growing, however fast the consumers are working.",
+      "id": 236,
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset[5m])) * 60",
+          "legendFormat": "{{topic}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Books with the least provenance",
+      "description": "One source means nothing can disagree, so nothing can be adjudicated.",
+      "id": 237,
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT left(b.title, 46) AS title, count(bs.source_id) AS sources, b.published_year AS year FROM books b LEFT JOIN book_sources bs ON bs.book_id = b.id GROUP BY b.id, b.title, b.published_year HAVING count(bs.source_id) <= 1 ORDER BY b.created_at DESC LIMIT 10",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
       }
     }
   ]
