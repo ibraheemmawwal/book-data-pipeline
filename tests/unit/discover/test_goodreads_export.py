@@ -156,3 +156,67 @@ class TestTheManifest:
             build_manifest(missing, manifest)
 
         assert not manifest.exists()
+
+
+class TestMalformedExports:
+    """A file that is not an export at all.
+
+    Worth distinguishing from an export with bad rows: a record the reader
+    cannot use is skipped and counted, but a file whose top level is not a list
+    of records means the wrong path was configured, and continuing silently
+    would produce an empty run that looks like a finished one.
+    """
+
+    def test_a_scalar_file_is_an_error_not_an_empty_run(self, tmp_path: Path) -> None:
+        path = tmp_path / "scalar.json"
+        path.write_text(json.dumps("not an export"), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected a list"):
+            list(stream_candidates(path))
+
+    def test_a_number_is_refused_the_same_way(self, tmp_path: Path) -> None:
+        path = tmp_path / "number.json"
+        path.write_text("42", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected a list"):
+            list(stream_candidates(path))
+
+    def test_non_object_entries_are_skipped(self, tmp_path: Path) -> None:
+        # A stray string in the array is a bad row, not a bad file.
+        path = export(tmp_path, [record(goodreadsId="1")])
+        path.write_text(
+            json.dumps([record(goodreadsId="1"), "stray", None, record(goodreadsId="2")]),
+            encoding="utf-8",
+        )
+
+        assert [c.candidate_key for c in stream_candidates(path)] == [
+            "goodreads:1",
+            "goodreads:2",
+        ]
+
+
+class TestAuthorParsing:
+    def test_blank_and_non_string_authors_are_dropped(self) -> None:
+        payload = to_goodreads_payload(record(author=["Harper Lee", "  ", None, 7]))
+
+        assert payload is not None
+        assert [a["name"] for a in payload["authors"]] == ["Harper Lee"]
+
+    def test_a_repeated_author_is_credited_once(self) -> None:
+        payload = to_goodreads_payload(record(author=["Ann Leckie", "Ann Leckie"]))
+
+        assert payload is not None
+        assert [a["name"] for a in payload["authors"]] == ["Ann Leckie"]
+
+    def test_a_bare_string_author_is_accepted(self) -> None:
+        # Not every export wraps a single author in a list.
+        payload = to_goodreads_payload(record(author="Ursula K. Le Guin"))
+
+        assert payload is not None
+        assert [a["name"] for a in payload["authors"]] == ["Ursula K. Le Guin"]
+
+    def test_no_author_still_yields_a_usable_record(self) -> None:
+        payload = to_goodreads_payload(record(author=[]))
+
+        assert payload is not None
+        assert payload["author"] == {}
