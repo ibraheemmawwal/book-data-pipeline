@@ -92,6 +92,8 @@ select = [
 # database driver or an HTTP client runs on each parse. Deferring them into the
 # task bodies is the documented Airflow practice, not an oversight.
 "dags/*" = ["PLC0415"]
+# An operator-facing script whose entire output is what it prints.
+"scripts/*" = ["T201"]
 # Same reason on the other side: these import Airflow and the DAG module only
 # after importorskip has confirmed the optional dependency is present.
 "tests/dag/*" = ["PLC0415"]
