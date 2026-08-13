@@ -296,6 +296,12 @@ services:
 
   load-consumer:
     profiles: [kafka]
+    # One per partition of books.clean. Declared here rather than passed as
+    # --scale, because --scale is not remembered: every rebuild silently
+    # dropped back to a single consumer, and the only symptom was throughput
+    # falling to a third with nothing anywhere saying why.
+    deploy:
+      replicas: ${LOAD_CONSUMERS:-3}
     build:
       context: .
       dockerfile: docker/pipeline.Dockerfile
