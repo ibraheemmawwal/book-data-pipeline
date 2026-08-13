@@ -21,6 +21,7 @@ import respx
 from pipeline.config import Settings
 from pipeline.extract.base import Rejected
 from pipeline.extract.goodreads import (
+    MAX_DETAIL_ATTEMPTS,
     GoodreadsExtractor,
     GoodreadsNotAcceptedError,
     GoodreadsResultCache,
@@ -419,6 +420,30 @@ class TestFinalEdgeCases:
 
 BOOK_SHOW = r".*/book/show/.*"
 WORK_EDITIONS = r".*/work/editions/.*"
+
+# Detail pages that yield something. Enrichment is a precondition now — a
+# search card carries no publication year and one author — so a test whose
+# subject is ranking or the ISBN floor has to let detail succeed, or it is
+# testing the enrichment rule by accident.
+BOOK_DETAIL_HTML = """<html><head>
+<script type="application/ld+json">
+{"@type": "Book", "name": "A Game of Thrones", "numberOfPages": 835,
+ "description": "A tale of ice and fire.",
+ "author": [{"@type": "Person", "name": "George R.R. Martin"}]}
+</script></head><body></body></html>"""
+
+EDITIONS_HTML = """<html><body><div data-testid="editionCell">
+Published August 2003 by Bantam
+ISBN 9780553588484
+</div></body></html>"""
+
+
+def serve_detail() -> None:
+    """Mock both detail pages with content a parser can read."""
+    respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(200, text=BOOK_DETAIL_HTML))
+    respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(200, text=EDITIONS_HTML))
+
+
 MARKUP = Path(__file__).parent.parent.parent / "fixtures"
 
 
@@ -430,8 +455,7 @@ class TestResolve:
         respx.get(AUTOCOMPLETE).mock(
             return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
         )
-        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
-        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+        serve_detail()
 
         async with extractor.build_client() as client:
             book = await extractor.resolve(client, "A Game of Thrones by George R.R. Martin")
@@ -485,8 +509,7 @@ class TestResolve:
                 ],
             )
         )
-        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
-        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+        serve_detail()
 
         async with extractor.build_client() as client:
             by_title = await extractor.resolve(client, "Dune")
@@ -502,8 +525,7 @@ class TestResolve:
         route = respx.get(AUTOCOMPLETE).mock(
             return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
         )
-        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
-        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+        serve_detail()
 
         async with extractor.build_client() as client:
             await extractor.resolve(client, "A Game of Thrones")
@@ -572,11 +594,15 @@ class TestEnrichment:
         assert book.isbns == []
 
     @respx.mock
-    async def test_both_pages_failing_leaves_the_autocomplete_observation(
-        self, extractor: GoodreadsExtractor
-    ) -> None:
-        # Detail is enrichment, not a precondition: autocomplete alone is
-        # already a valid record.
+    async def test_both_pages_failing_yields_no_record(self, extractor: GoodreadsExtractor) -> None:
+        """Enrichment is a precondition, not a bonus.
+
+        A search card is not a record of a book: Goodreads publishes no
+        publication year outside the editions page, and the card names a single
+        author where the work may have three. Keeping one anyway is how 480
+        stored observations came to have no years between them, each looking
+        like a successful resolution.
+        """
         respx.get(AUTOCOMPLETE).mock(
             return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
         )
@@ -586,16 +612,39 @@ class TestEnrichment:
         async with extractor.build_client() as client:
             book = await extractor.resolve(client, "A Game of Thrones")
 
-        assert book is not None
-        assert book.title == "A Game of Thrones"
-        assert book.page_count == 835
+        assert book is None
 
     @respx.mock
     async def test_detail_is_fetched_for_the_winner_only(
         self, extractor: GoodreadsExtractor
     ) -> None:
         # Fanning detail across every autocomplete result would multiply our
-        # traffic against an unofficial source for no gain.
+        # traffic against an unofficial source for no gain. When the winner's
+        # pages answer, nothing below it is touched.
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
+        )
+        book_route = respx.get(url__regex=BOOK_SHOW).mock(
+            return_value=httpx.Response(200, text=BOOK_DETAIL_HTML)
+        )
+        respx.get(url__regex=WORK_EDITIONS).mock(
+            return_value=httpx.Response(200, text=EDITIONS_HTML)
+        )
+
+        async with extractor.build_client() as client:
+            await extractor.resolve(client, "A Game of Thrones")
+
+        assert book_route.call_count == 1
+
+    @respx.mock
+    async def test_a_winner_with_no_detail_falls_through_to_the_next(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        """The fall-through the loop always documented and never performed.
+
+        It returned the un-enriched card instead, so candidates two and three
+        were unreachable and a failed detail fetch looked like a resolution.
+        """
         respx.get(AUTOCOMPLETE).mock(
             return_value=httpx.Response(200, json=load("goodreads_autocomplete.json"))
         )
@@ -605,7 +654,8 @@ class TestEnrichment:
         async with extractor.build_client() as client:
             await extractor.resolve(client, "A Game of Thrones")
 
-        assert book_route.call_count == 1
+        assert book_route.call_count > 1, "gave up on the first candidate"
+        assert book_route.call_count <= MAX_DETAIL_ATTEMPTS, "unbounded fan-out"
 
 
 class TestEnrichmentReplay:
@@ -710,8 +760,7 @@ class TestIsbnSanityFloor:
                 json=[{"bookId": "1", "title": "Dune", "bookTitleBare": "Dune"}],
             )
         )
-        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
-        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+        serve_detail()
 
         async with extractor.build_client() as client:
             book = await extractor.resolve(client, "Dune", isbn="9780441172719")
@@ -736,8 +785,7 @@ class TestIsbnSanityFloor:
                 ],
             )
         )
-        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(404))
-        respx.get(url__regex=WORK_EDITIONS).mock(return_value=httpx.Response(404))
+        serve_detail()
 
         async with extractor.build_client() as client:
             book = await extractor.resolve(client, "A Brief History of Time", isbn="9780553380163")

@@ -325,6 +325,26 @@ def parse_aria_series(label: str | None) -> tuple[str, Decimal | None] | None:
     return (name, position) if name else None
 
 
+def _json_ld_authors(document: dict[str, Any]) -> tuple[str, ...]:
+    """Every author the page credits, in order.
+
+    The search card carries a single ``author`` object, so a book with three
+    contributors arrived with one and the other two were simply absent from the
+    catalogue. JSON-LD carries the full array, which is the only place on the
+    page they all appear.
+    """
+    raw = document.get("author")
+    entries = raw if isinstance(raw, list) else [raw]
+
+    names: list[str] = []
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else entry
+        text = _as_text(name)
+        if text and text not in names:
+            names.append(text.strip())
+    return tuple(names)
+
+
 def parse_json_ld(html: str) -> dict[str, Any] | None:
     """Pull the Book JSON-LD block out of a detail page.
 
@@ -366,6 +386,7 @@ class BookDetail:
     description: str | None = None
     page_count: int | None = None
     series: RawSeriesMembership | None = None
+    authors: tuple[str, ...] = ()
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -392,12 +413,14 @@ def parse_book_detail(markup: str) -> BookDetail:
     payload: dict[str, Any] = {}
     description: str | None = None
     page_count: int | None = None
+    authors: tuple[str, ...] = ()
 
     document = parse_json_ld(markup)
     if document is not None:
         payload["json_ld"] = document
         description = clean_html_text(_as_text(document.get("description")))
         page_count = _as_positive_int(document.get("numberOfPages"))
+        authors = _json_ld_authors(document)
 
     tree = HTMLParser(markup)
 
@@ -429,7 +452,11 @@ def parse_book_detail(markup: str) -> BookDetail:
         break
 
     return BookDetail(
-        description=description, page_count=page_count, series=series, payload=payload
+        description=description,
+        page_count=page_count,
+        series=series,
+        authors=authors,
+        payload=payload,
     )
 
 

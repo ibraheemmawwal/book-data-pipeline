@@ -308,6 +308,11 @@ class GoodreadsExtractor:
             if isinstance(observation, Rejected):
                 continue
             enriched = await self._enrich(client, observation, candidate)
+            if enriched is None:
+                # The fall-through this loop always documented and never did:
+                # it returned the un-enriched card instead, so candidates two
+                # and three were never reached.
+                continue
             # Only validated, non-empty results are cached. Caching a miss
             # would turn a transient blip into a run-long hole.
             self._cache.put(cache_key, enriched, is_isbn=isbn is not None)
@@ -370,18 +375,26 @@ class GoodreadsExtractor:
         client: httpx.AsyncClient,
         observation: RawBook,
         candidate: dict[str, Any],
-    ) -> RawBook:
+    ) -> RawBook | None:
         """Add detail-page facts to an autocomplete observation.
 
-        The book and work pages are fetched concurrently with
-        ``return_exceptions=True``: one surviving page still produces a better
-        observation than neither, and detail is enrichment rather than a
-        precondition. Autocomplete alone is already a valid record.
+        Returns ``None`` when neither detail page yielded anything, so the
+        caller can try the next candidate instead of keeping a card.
+
+        A search card is not a record of a book. It carries no publication year
+        — Goodreads publishes none outside the editions page — and a single
+        author where the work may have three. Accepting one anyway is how 480
+        stored observations came to have 10.4% detail coverage and no years
+        between them, each one looking like a successful resolution.
+
+        The two pages are still fetched with ``return_exceptions=True`` and
+        either alone is enough: they fail independently, and the site answers
+        them differently. What is no longer acceptable is neither.
         """
         book_id = candidate.get("bookId")
         work_id = candidate.get("workId")
         if not book_id:
-            return observation
+            return None
 
         # Deliberately different Accept headers. The book page returns 200 for
         # a JSON ask and 202 with an empty challenge body for a browser-like
@@ -407,6 +420,10 @@ class GoodreadsExtractor:
                 updates["series"] = [detail.series]
             if detail.page_count:
                 updates["page_count"] = detail.page_count
+            if detail.authors:
+                # The full credited list. The search card names one author, so
+                # without this a book with three keeps only the first.
+                updates["authors"] = [RawAuthor(name=name) for name in detail.authors]
 
         if work_html is not None:
             edition = parse_first_edition(work_html)
@@ -419,7 +436,13 @@ class GoodreadsExtractor:
                 updates["publisher"] = edition.publisher
 
         if not updates:
-            return observation
+            logger.warning(
+                "goodreads.detail_empty",
+                book_id=book_id,
+                work_id=work_id,
+                detail="neither detail page yielded anything; trying the next candidate",
+            )
+            return None
 
         updates["raw_payload"] = payload
         return observation.model_copy(update=updates)

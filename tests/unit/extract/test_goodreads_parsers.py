@@ -410,3 +410,59 @@ class TestAuthorCannotRescueATitle:
         # Providers spell names differently; a title match is the stronger
         # signal and should survive an author we cannot confirm.
         assert score_candidate("Dune", "F. Herbert", "Dune", "Frank Herbert") >= 0.4
+
+
+class TestEveryCreditedAuthor:
+    """The search card names one author; the work may have three.
+
+    A live sample had 'Chinese SF in Translation' credited to Yiqing Gu alone,
+    where the page's JSON-LD lists Yiqing Gu, Riccardo Moratto and Yun Wu. The
+    other two were simply absent from the catalogue — not wrong, missing, which
+    is harder to notice.
+    """
+
+    def test_all_of_them_are_read(self) -> None:
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "name": "Chinese SF in Translation",
+         "author": [{"@type": "Person", "name": "Yiqing Gu"},
+                    {"@type": "Person", "name": "Riccardo Moratto"},
+                    {"@type": "Person", "name": "Yun Wu"}]}
+        </script></head><body></body></html>"""
+
+        assert parse_book_detail(markup).authors == (
+            "Yiqing Gu",
+            "Riccardo Moratto",
+            "Yun Wu",
+        )
+
+    def test_order_is_preserved(self) -> None:
+        # First-credited is the primary author, and the loader uses position.
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "name": "X",
+         "author": [{"name": "Second"}, {"name": "First"}]}
+        </script></head><body></body></html>"""
+
+        assert parse_book_detail(markup).authors[0] == "Second"
+
+    def test_a_single_author_object_still_works(self) -> None:
+        # Schema.org permits either a list or a bare object.
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "name": "X", "author": {"name": "Solo Writer"}}
+        </script></head><body></body></html>"""
+
+        assert parse_book_detail(markup).authors == ("Solo Writer",)
+
+    def test_duplicates_are_collapsed(self) -> None:
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "name": "X",
+         "author": [{"name": "Same Person"}, {"name": "Same Person"}]}
+        </script></head><body></body></html>"""
+
+        assert parse_book_detail(markup).authors == ("Same Person",)
+
+    def test_no_authors_is_empty_not_an_error(self) -> None:
+        markup = """<html><head><script type="application/ld+json">
+        {"@type": "Book", "name": "X"}
+        </script></head><body></body></html>"""
+
+        assert parse_book_detail(markup).authors == ()

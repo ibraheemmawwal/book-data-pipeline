@@ -23,6 +23,31 @@ from pipeline.models.domain import CandidateBook, SourceName
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures"
 AUTOCOMPLETE = "https://www.goodreads.com/book/auto_complete"
+
+# Goodreads enrichment is a precondition, not a bonus: a search card has no
+# publication year and one author, so a card that never reaches its detail
+# pages is no longer a resolution. Tests about the *resolver* have to let that
+# succeed, or they are testing the Goodreads rule by accident.
+_BOOK_DETAIL = """<html><head><script type="application/ld+json">
+{"@type": "Book", "name": "Dune", "numberOfPages": 412,
+ "author": [{"@type": "Person", "name": "Frank Herbert"}]}
+</script></head><body></body></html>"""
+
+_EDITIONS = """<html><body><div data-testid="editionCell">
+Published June 1965 by Chilton Books
+ISBN 9780441172719
+</div></body></html>"""
+
+
+def mock_goodreads_detail() -> None:
+    respx.get(url__regex=r".*/book/show/.*").mock(
+        return_value=httpx.Response(200, text=_BOOK_DETAIL)
+    )
+    respx.get(url__regex=r".*/work/editions/.*").mock(
+        return_value=httpx.Response(200, text=_EDITIONS)
+    )
+
+
 OL_SEARCH = "https://openlibrary.org/search.json"
 GB_VOLUMES = "https://www.googleapis.com/books/v1/volumes"
 GUTENDEX = "https://gutendex.com/books"
@@ -108,8 +133,7 @@ class TestGoodreadsFirst:
         self, accepted: Settings, goodreads: GoodreadsExtractor
     ) -> None:
         respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=autocomplete_payload()))
-        respx.get(url__regex=r".*/book/show/.*").mock(return_value=httpx.Response(404))
-        respx.get(url__regex=r".*/work/editions/.*").mock(return_value=httpx.Response(404))
+        mock_goodreads_detail()
 
         result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(candidate())
 
@@ -208,8 +232,7 @@ class TestRetainedDiscovery:
             respx.get(AUTOCOMPLETE).mock(
                 return_value=httpx.Response(200, json=autocomplete_payload())
             )
-            respx.get(url__regex=r".*/book/show/.*").mock(return_value=httpx.Response(404))
-            respx.get(url__regex=r".*/work/editions/.*").mock(return_value=httpx.Response(404))
+            mock_goodreads_detail()
             result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(
                 candidate(discovery_payload={"key": "/works/OL1W", "title": "A Game of Thrones"})
             )
@@ -339,8 +362,7 @@ class TestDocumentedFallbacks:
         # Filling gaps is not the same as re-answering an answered question;
         # spending budget here would starve the candidates that need it.
         respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=autocomplete_payload()))
-        respx.get(url__regex=r".*/book/show/.*").mock(return_value=httpx.Response(404))
-        respx.get(url__regex=r".*/work/editions/.*").mock(return_value=httpx.Response(404))
+        mock_goodreads_detail()
         gb = respx.get(GB_VOLUMES).mock(return_value=httpx.Response(200, json={}))
 
         result = await CatalogueResolver(accepted, goodreads=goodreads).resolve(candidate())
