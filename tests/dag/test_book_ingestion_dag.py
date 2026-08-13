@@ -203,7 +203,7 @@ class TestTriggerParameters:
     def test_the_source_can_be_chosen(self, dagbag: Any) -> None:
         param = dagbag.dags[DAG_ID].params.get_param("discovery_source")
 
-        assert param.schema["enum"] == ["openlibrary_dump", "gutendex"]
+        assert param.schema["enum"] == ["openlibrary_dump", "gutendex", "goodreads_export"]
 
     def test_the_dump_is_the_default_source(self, dagbag: Any) -> None:
         """It is the only source with coverage of the last century.

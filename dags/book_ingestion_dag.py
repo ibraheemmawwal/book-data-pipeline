@@ -99,12 +99,14 @@ DEFAULT_ARGS: dict[str, Any] = {
         "discovery_source": Param(
             "openlibrary_dump",
             type="string",
-            enum=["openlibrary_dump", "gutendex"],
+            enum=["openlibrary_dump", "gutendex", "goodreads_export"],
             title="Discovery source",
             description=(
                 "Where candidates come from. The Open Library dump is the "
                 "default and the only one with broad coverage of older books; "
-                "Gutendex is public-domain only."
+                "Gutendex is public-domain only; goodreads_export reads a file "
+                "of previously scraped Goodreads records, which costs that "
+                "source nothing and carries every credited author."
             ),
         ),
         "max_candidates": Param(
@@ -124,6 +126,12 @@ DEFAULT_ARGS: dict[str, Any] = {
                 "beginning — useful after a schema change, and harmless because "
                 "loading is idempotent."
             ),
+        ),
+        "export_path": Param(
+            "/data/goodreads_export.json",
+            type="string",
+            title="Goodreads export file",
+            description="Only used when the discovery source is goodreads_export.",
         ),
         "refresh_dump": Param(
             False,
@@ -164,10 +172,16 @@ def book_ingestion() -> None:
             # size check; removing it is the only way to force a real refetch.
             destination.unlink()
 
-        if params.get("discovery_source") == "gutendex":
-            # Gutendex publishes no dump. Discovery reads its API directly, so
-            # there is nothing to fetch and saying so beats a silent no-op.
-            return {"path": "", "bytes": 0, "downloaded": False, "reason": "gutendex has no dump"}
+        if params.get("discovery_source") in {"gutendex", "goodreads_export"}:
+            # Neither publishes a dump: Gutendex is read through its API, and
+            # the Goodreads export is a file that already exists. Saying so
+            # beats a silent no-op.
+            return {
+                "path": "",
+                "bytes": 0,
+                "downloaded": False,
+                "reason": f"{params['discovery_source']} has no dump to fetch",
+            }
 
         result = fetch(
             destination,  # type: ignore[arg-type]
@@ -206,6 +220,72 @@ def book_ingestion() -> None:
         params = context["params"]
         settings = Settings()
         limit = params.get("max_candidates") or settings.discovery_max_candidates
+
+        if params.get("discovery_source") == "goodreads_export":
+            from pipeline.discover.goodreads_export import (
+                build_manifest as build_from_export,
+            )
+
+            export = Path(params.get("export_path") or "/data/goodreads_export.json")
+            if not export.exists():
+                msg = f"no export at {export}; mount it or set export_path"
+                raise FileNotFoundError(msg)
+
+            # Resumed by the same mechanism as the dump, keyed on the file: a
+            # 32,000-record export is many runs' work, and starting over each
+            # night would re-resolve the beginning and never reach the end.
+            key = dump_key(export)
+            engine = build_engine(settings.database_url)
+            start = 0 if not params.get("resume", True) else read_position(engine, key)
+
+            written = build_from_export(
+                export,
+                settings.discovery_manifest_path,
+                max_candidates=limit,
+                start_index=start,
+            )
+            if written:
+                save_position(engine, key, line_offset=start + written, emitted=written)
+            return {
+                "manifest": str(settings.discovery_manifest_path),
+                "candidates": written,
+                "source": "goodreads_export",
+                "start_index": start,
+                "status": "success" if written else "exhausted",
+            }
+
+        if params.get("discovery_source") == "goodreads_export":
+            from pipeline.discover.goodreads_export import (
+                build_manifest as build_from_export,
+            )
+
+            export = Path(params.get("export_path") or "/data/goodreads_export.json")
+            if not export.exists():
+                msg = f"no export at {export}; mount it or set export_path"
+                raise FileNotFoundError(msg)
+
+            # Resumed by the same mechanism as the dump, keyed on the file: a
+            # 32,000-record export is many runs' work, and starting over each
+            # night would re-resolve the beginning and never reach the end.
+            key = dump_key(export)
+            engine = build_engine(settings.database_url)
+            start = 0 if not params.get("resume", True) else read_position(engine, key)
+
+            written = build_from_export(
+                export,
+                settings.discovery_manifest_path,
+                max_candidates=limit,
+                start_index=start,
+            )
+            if written:
+                save_position(engine, key, line_offset=start + written, emitted=written)
+            return {
+                "manifest": str(settings.discovery_manifest_path),
+                "candidates": written,
+                "source": "goodreads_export",
+                "start_index": start,
+                "status": "success" if written else "exhausted",
+            }
 
         if params.get("discovery_source") == "gutendex":
             from pipeline.discover.gutendex_source import (

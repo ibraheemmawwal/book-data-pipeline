@@ -38,7 +38,7 @@ import httpx
 import structlog
 
 from pipeline.config import Settings
-from pipeline.extract import build_extractor
+from pipeline.extract import build_extractor, map_payload
 from pipeline.extract.base import (
     ExtractionRequest,
     Extractor,
@@ -52,7 +52,6 @@ from pipeline.extract.goodreads import (
     GoodreadsUnavailableError,
 )
 from pipeline.extract.googlebooks import MissingCredentialError
-from pipeline.extract.openlibrary import map_payload
 from pipeline.models.domain import CandidateBook, RawBook, SourceName
 
 logger = structlog.get_logger(__name__)
@@ -497,11 +496,12 @@ class CatalogueResolver:
         resolved the candidate, because a lower-priority observation can still
         fill a field the preferred source lacked.
         """
+        source = candidate.discovery_source
         if not candidate.discovery_payload:
             result.attempts.append(
                 Attempt(
                     candidate.candidate_key,
-                    SourceName.OPENLIBRARY,
+                    source,
                     1,
                     Outcome.SKIPPED,
                     "no retained discovery payload",
@@ -510,13 +510,13 @@ class CatalogueResolver:
             return
 
         timer = _Timer(self._clock)
-        mapped = map_payload(candidate.discovery_payload)
+        mapped = map_payload(source, candidate.discovery_payload)
         if isinstance(mapped, Rejected):
             result.rejections.append(mapped)
             result.attempts.append(
                 Attempt(
                     candidate.candidate_key,
-                    SourceName.OPENLIBRARY,
+                    source,
                     1,
                     Outcome.CONTRACT_FAILURE,
                     mapped.detail,
@@ -529,7 +529,7 @@ class CatalogueResolver:
         result.attempts.append(
             Attempt(
                 candidate.candidate_key,
-                SourceName.OPENLIBRARY,
+                source,
                 1,
                 Outcome.RESOLVED,
                 "retained discovery payload",

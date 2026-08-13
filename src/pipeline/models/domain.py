@@ -127,6 +127,11 @@ class CandidateBook(_Frozen):
     openlibrary_edition_key: str | None = None
     languages: list[str] = Field(default_factory=list)
     discovery_payload: dict[str, Any] = Field(default_factory=dict)
+    # Which source the retained payload came from. Discovery used to mean the
+    # Open Library dump and nothing else, so the mapper was assumed; a bulk
+    # export from another source is still discovery, and its payload still has
+    # to be read by the mapper that understands it.
+    discovery_source: SourceName = SourceName.OPENLIBRARY
 
     def lookup_query(self) -> str:
         """The string a title/author resolver should search for."""
