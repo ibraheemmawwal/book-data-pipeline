@@ -310,7 +310,73 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # --- observability -----------------------------------------------------
+  # Its own profile: three more containers is a real cost for a stack that
+  # already runs thirteen, and the pipeline does not need them to work. Bring
+  # them up when you want to watch something.
+  #
+  #   docker compose --profile observability up -d
+  #   http://127.0.0.1:3000
+  #
+  # This exists because a hosted page cannot: consumer lag and Airflow state
+  # are only reachable from inside this network, and the catalogue API sends no
+  # CORS header. Grafana runs where the data is.
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # No sign-in for a dashboard bound to loopback, for the same reason
+      # Airflow has none here: a login that protects nothing is friction.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      CATALOGUE_PG_HOST: ${CATALOGUE_PG_HOST:-catalogue-db:5432}
+      CATALOGUE_PG_DB: ${CATALOGUE_PG_DB:-catalogue}
+      CATALOGUE_PG_USER: ${CATALOGUE_PG_USER:-catalogue}
+      CATALOGUE_PG_PASSWORD: ${CATALOGUE_PG_PASSWORD:-catalogue}
+    ports:
+      # Loopback only. The datasource credentials are inside this container.
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Short retention: this is a local development stack, not a time-series
+      # archive, and the interesting question is always "right now".
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  # The one thing here with no database behind it. Kafka publishes consumer
+  # lag over JMX only, so it takes an exporter to become a number anything
+  # else can read.
+  kafka-exporter:
+    profiles: [observability]
+    image: danielqsj/kafka-exporter:v1.9.0
+    command: ["--kafka.server=kafka:9092"]
+    # No depends_on: the broker lives in a different profile, and a hard
+    # dependency across profiles makes the whole project invalid when only one
+    # of them is selected. The exporter retries until Kafka answers.
+    restart: unless-stopped
+
 volumes:
+  grafana-data:
+  prometheus-data:
   catalogue-data:
   airflow-data:
   airflow-logs:

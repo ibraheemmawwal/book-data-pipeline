@@ -1,0 +1,46 @@
+# Datasources, provisioned rather than clicked.
+#
+# Grafana can reach all three systems because it runs inside the compose
+# network: the two Postgres databases directly, and Kafka through an exporter.
+# That is the whole reason this exists rather than a hosted page — consumer lag
+# and Airflow state are not reachable from outside.
+apiVersion: 1
+
+datasources:
+  # The catalogue itself. Read-only credentials would be better and are not
+  # available on Neon's free tier; the queries in the dashboards are SELECTs.
+  - name: Catalogue
+    uid: catalogue
+    type: postgres
+    url: ${CATALOGUE_PG_HOST}
+    database: ${CATALOGUE_PG_DB}
+    user: ${CATALOGUE_PG_USER}
+    isDefault: true
+    jsonData:
+      sslmode: require
+      postgresVersion: 1800
+      timescaledb: false
+    secureJsonData:
+      password: ${CATALOGUE_PG_PASSWORD}
+
+  # Airflow's own metadata database: which runs exist and what state they are
+  # in. Airflow publishes no useful metrics endpoint without StatsD, and the
+  # database is the source of truth the scheduler itself reads.
+  - name: Airflow
+    uid: airflow
+    type: postgres
+    url: airflow-db:5432
+    database: airflow
+    user: airflow
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1800
+    secureJsonData:
+      password: airflow
+
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    jsonData:
+      timeInterval: 15s

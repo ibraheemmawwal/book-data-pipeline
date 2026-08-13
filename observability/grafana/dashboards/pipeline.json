@@ -1,0 +1,521 @@
+{
+  "uid": "pipeline-vitals",
+  "title": "Pipeline Vitals",
+  "description": "Backlog, catalogue growth, provenance and run state. The three systems that each hold part of the answer, on one screen.",
+  "tags": [
+    "catalogue",
+    "pipeline"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Backlog",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer lag by group",
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 0,
+        "y": 1
+      },
+      "id": 1,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "gradientMode": "opacity",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Load backlog",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"})",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 500
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Books",
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 3,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM books",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Catalogue",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 101
+    },
+    {
+      "type": "timeseries",
+      "title": "Books added per hour",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 4,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) AS \"books\" FROM books WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "gradientMode": "opacity",
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Field coverage",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 5,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 'publication year' AS field, count(*) FILTER (WHERE published_year IS NOT NULL) AS present, round(100.0 * count(*) FILTER (WHERE published_year IS NOT NULL) / greatest(count(*),1), 1) AS pct FROM books UNION ALL SELECT 'isbn-13', count(*) FILTER (WHERE isbn13 IS NOT NULL), round(100.0 * count(*) FILTER (WHERE isbn13 IS NOT NULL) / greatest(count(*),1), 1) FROM books UNION ALL SELECT 'description', count(*) FILTER (WHERE description IS NOT NULL), round(100.0 * count(*) FILTER (WHERE description IS NOT NULL) / greatest(count(*),1), 1) FROM books",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Provenance",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 102
+    },
+    {
+      "type": "table",
+      "title": "Records per source",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 17
+      },
+      "id": 6,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT source, count(*) AS records, count(DISTINCT book_id) AS books FROM book_sources GROUP BY source ORDER BY records DESC",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Goodreads enrichment",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 17
+      },
+      "id": 7,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS \"goodreads records\", count(*) FILTER (WHERE raw_payload ? '_edition') AS \"with editions page\", count(*) FILTER (WHERE raw_payload ? '_detail') AS \"with book page\" FROM book_sources WHERE source='goodreads'",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Contested, not yet adjudicated",
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 17
+      },
+      "id": 8,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM (SELECT b.id FROM books b JOIN book_sources bs ON bs.book_id=b.id WHERE NOT EXISTS (SELECT 1 FROM book_sources g WHERE g.book_id=b.id AND g.source='goodreads') GROUP BY b.id HAVING count(DISTINCT bs.source) > 1) t",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Runs",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 103
+    },
+    {
+      "type": "table",
+      "title": "Recent ingestion runs",
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 25
+      },
+      "id": 9,
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at, status, records_extracted AS extracted, records_loaded AS loaded, records_rejected AS rejected FROM ingestion_runs ORDER BY started_at DESC LIMIT 12",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Airflow dag runs",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 25
+      },
+      "id": 10,
+      "datasource": {
+        "type": "postgres",
+        "uid": "airflow"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT start_date, dag_id, state FROM dag_run ORDER BY start_date DESC NULLS LAST LIMIT 12",
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "airflow"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

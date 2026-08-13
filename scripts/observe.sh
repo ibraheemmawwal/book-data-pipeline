@@ -24,7 +24,7 @@ airflow_sql() {
 }
 
 catalogue() {
-  docker compose exec -T airflow-scheduler python /tmp/_observe_catalogue.py 2>/dev/null
+  docker compose exec -T airflow-scheduler python /tmp/_observe_catalogue.py "$@" 2>/dev/null
 }
 
 docker compose cp scripts/observe_catalogue.py airflow-scheduler:/tmp/_observe_catalogue.py >/dev/null 2>&1

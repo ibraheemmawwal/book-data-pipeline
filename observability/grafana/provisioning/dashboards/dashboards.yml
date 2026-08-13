@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: pipeline
+    orgId: 1
+    folder: Pipeline
+    type: file
+    disableDeletion: false
+    # Edits in the UI are kept, but the file is the source of truth on restart:
+    # a dashboard that only exists in someone's browser is not observability.
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
