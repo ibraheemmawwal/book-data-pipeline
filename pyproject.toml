@@ -94,6 +94,8 @@ select = [
 "dags/*" = ["PLC0415"]
 # An operator-facing script whose entire output is what it prints.
 "scripts/*" = ["T201"]
+# Same: an operator-facing check whose output is the point.
+"observability/*" = ["T201"]
 # Same reason on the other side: these import Airflow and the DAG module only
 # after importorskip has confirmed the optional dependency is present.
 "tests/dag/*" = ["PLC0415"]

@@ -185,7 +185,8 @@ class LoadConsumer:
     def _write_tally(self, run_id: Any = None) -> None:
         """Persist pending counts, for one run or all of them."""
         pending = (
-            {run_id: self._tally.pop(run_id)} if run_id in self._tally
+            {run_id: self._tally.pop(run_id)}
+            if run_id in self._tally
             else ({} if run_id is not None else dict(self._tally))
         )
         if run_id is None:

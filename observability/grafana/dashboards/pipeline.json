@@ -1,98 +1,53 @@
 {
   "uid": "pipeline-vitals",
   "title": "Pipeline Vitals",
-  "description": "Backlog, catalogue growth, provenance and run state. The three systems that each hold part of the answer, on one screen.",
+  "description": "Backlog with a drain projection, catalogue growth, provenance and run state \u2014 the three systems that each hold part of the answer, on one screen.",
   "tags": [
     "catalogue",
     "pipeline"
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
-    "from": "now-24h",
+    "from": "now-6h",
     "to": "now"
   },
   "panels": [
     {
       "type": "row",
-      "title": "Backlog",
+      "title": "Backlog and drain",
+      "id": 200,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
       },
-      "id": 100
-    },
-    {
-      "type": "timeseries",
-      "title": "Consumer lag by group",
-      "gridPos": {
-        "h": 7,
-        "w": 16,
-        "x": 0,
-        "y": 1
-      },
-      "id": 1,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "expr": "sum by (consumergroup) (kafka_consumergroup_lag)",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 12,
-            "gradientMode": "opacity",
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
+      "panels": []
     },
     {
       "type": "stat",
       "title": "Load backlog",
+      "description": "Messages written to books.clean that the catalogue has not absorbed.",
+      "id": 201,
       "gridPos": {
-        "h": 7,
+        "h": 5,
         "w": 4,
-        "x": 16,
+        "x": 0,
         "y": 1
       },
-      "id": 2,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "targets": [
         {
-          "expr": "sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"})",
           "refId": "A",
+          "expr": "sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"})",
+          "legendFormat": "",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -114,6 +69,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "decimals": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -137,24 +93,261 @@
     },
     {
       "type": "stat",
-      "title": "Books",
+      "title": "Time to drain",
+      "description": "Backlog divided by how fast it is actually falling, over ten minutes. Rises when a rebuild pauses the consumers \u2014 that is real, not noise.",
+      "id": 202,
       "gridPos": {
-        "h": 7,
+        "h": 5,
+        "w": 5,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"}) / clamp_min(-deriv(sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"})[10m:30s]), 0.001)",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 3600
+              },
+              {
+                "color": "red",
+                "value": 43200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Net drain",
+      "description": "Messages per minute the backlog is shrinking by: consumed minus produced.",
+      "id": 203,
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 9,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "-deriv(sum(kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"})[10m:30s]) * 60",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Produced",
+      "description": "Messages per minute arriving on books.clean.",
+      "id": 204,
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 13,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"books.clean\"}[5m])) * 60",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Consumers",
+      "description": "Three partitions means three can work. Fewer, and parallelism is idle.",
+      "id": 205,
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 17,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kafka_consumergroup_members{consumergroup=\"book-pipeline-load\"})",
+          "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Books",
+      "description": "",
+      "id": 206,
+      "gridPos": {
+        "h": 5,
         "w": 4,
         "x": 20,
         "y": 1
       },
-      "id": 3,
       "datasource": {
         "type": "postgres",
         "uid": "catalogue"
       },
       "targets": [
         {
+          "refId": "A",
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT count(*) AS value FROM books",
-          "refId": "A",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -176,6 +369,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "decimals": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -190,39 +384,28 @@
       }
     },
     {
-      "type": "row",
-      "title": "Catalogue",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 8
-      },
-      "id": 101
-    },
-    {
       "type": "timeseries",
-      "title": "Books added per hour",
+      "title": "Backlog over time",
+      "description": "Transform caught up while load lags is the normal shape: Kafka delivers faster than a database an ocean away can absorb.",
+      "id": 207,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 6
       },
-      "id": 4,
       "datasource": {
-        "type": "postgres",
-        "uid": "catalogue"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
       "targets": [
         {
-          "format": "time_series",
-          "rawQuery": true,
-          "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) AS \"books\" FROM books WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
           "refId": "A",
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag)",
+          "legendFormat": "{{consumergroup}}",
           "datasource": {
-            "type": "postgres",
-            "uid": "catalogue"
+            "type": "prometheus",
+            "uid": "prometheus"
           }
         }
       ],
@@ -232,9 +415,10 @@
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
-            "fillOpacity": 12,
+            "fillOpacity": 14,
             "gradientMode": "opacity",
-            "showPoints": "never"
+            "showPoints": "never",
+            "spanNulls": true
           }
         },
         "overrides": []
@@ -252,150 +436,91 @@
       }
     },
     {
-      "type": "table",
-      "title": "Field coverage",
+      "type": "timeseries",
+      "title": "Lag by partition",
+      "description": "One line well above the others means that partition's consumer is stuck or slower.",
+      "id": 208,
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 6
       },
-      "id": 5,
       "datasource": {
-        "type": "postgres",
-        "uid": "catalogue"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
       "targets": [
         {
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT 'publication year' AS field, count(*) FILTER (WHERE published_year IS NOT NULL) AS present, round(100.0 * count(*) FILTER (WHERE published_year IS NOT NULL) / greatest(count(*),1), 1) AS pct FROM books UNION ALL SELECT 'isbn-13', count(*) FILTER (WHERE isbn13 IS NOT NULL), round(100.0 * count(*) FILTER (WHERE isbn13 IS NOT NULL) / greatest(count(*),1), 1) FROM books UNION ALL SELECT 'description', count(*) FILTER (WHERE description IS NOT NULL), round(100.0 * count(*) FILTER (WHERE description IS NOT NULL) / greatest(count(*),1), 1) FROM books",
           "refId": "A",
+          "expr": "kafka_consumergroup_lag{consumergroup=\"book-pipeline-load\"}",
+          "legendFormat": "partition {{partition}}",
           "datasource": {
-            "type": "postgres",
-            "uid": "catalogue"
+            "type": "prometheus",
+            "uid": "prometheus"
           }
         }
       ],
-      "options": {
-        "showHeader": true
-      },
       "fieldConfig": {
         "defaults": {
+          "unit": "short",
           "custom": {
-            "align": "auto"
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
           }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "type": "row",
-      "title": "Provenance",
+      "title": "Catalogue",
+      "id": 209,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 13
       },
-      "id": 102
-    },
-    {
-      "type": "table",
-      "title": "Records per source",
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 0,
-        "y": 17
-      },
-      "id": 6,
-      "datasource": {
-        "type": "postgres",
-        "uid": "catalogue"
-      },
-      "targets": [
-        {
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT source, count(*) AS records, count(DISTINCT book_id) AS books FROM book_sources GROUP BY source ORDER BY records DESC",
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "catalogue"
-          }
-        }
-      ],
-      "options": {
-        "showHeader": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto"
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "table",
-      "title": "Goodreads enrichment",
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 8,
-        "y": 17
-      },
-      "id": 7,
-      "datasource": {
-        "type": "postgres",
-        "uid": "catalogue"
-      },
-      "targets": [
-        {
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT count(*) AS \"goodreads records\", count(*) FILTER (WHERE raw_payload ? '_edition') AS \"with editions page\", count(*) FILTER (WHERE raw_payload ? '_detail') AS \"with book page\" FROM book_sources WHERE source='goodreads'",
-          "refId": "A",
-          "datasource": {
-            "type": "postgres",
-            "uid": "catalogue"
-          }
-        }
-      ],
-      "options": {
-        "showHeader": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto"
-          }
-        },
-        "overrides": []
-      }
+      "panels": []
     },
     {
       "type": "stat",
-      "title": "Contested, not yet adjudicated",
+      "title": "Added in the last hour",
+      "description": "Zero while the backlog replays books already held \u2014 re-loading one is a no-op by design.",
+      "id": 210,
       "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 17
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 14
       },
-      "id": 8,
       "datasource": {
         "type": "postgres",
         "uid": "catalogue"
       },
       "targets": [
         {
+          "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT count(*) AS value FROM (SELECT b.id FROM books b JOIN book_sources bs ON bs.book_id=b.id WHERE NOT EXISTS (SELECT 1 FROM book_sources g WHERE g.book_id=b.id AND g.source='goodreads') GROUP BY b.id HAVING count(DISTINCT bs.source) > 1) t",
-          "refId": "A",
+          "rawSql": "SELECT count(*) AS value FROM books WHERE created_at > now() - interval '1 hour'",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -417,6 +542,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "decimals": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -431,36 +557,26 @@
       }
     },
     {
-      "type": "row",
-      "title": "Runs",
+      "type": "stat",
+      "title": "Year coverage",
+      "description": "",
+      "id": 211,
       "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 24
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 14
       },
-      "id": 103
-    },
-    {
-      "type": "table",
-      "title": "Recent ingestion runs",
-      "gridPos": {
-        "h": 8,
-        "w": 14,
-        "x": 0,
-        "y": 25
-      },
-      "id": 9,
       "datasource": {
         "type": "postgres",
         "uid": "catalogue"
       },
       "targets": [
         {
+          "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT started_at, status, records_extracted AS extracted, records_loaded AS loaded, records_rejected AS rejected FROM ingestion_runs ORDER BY started_at DESC LIMIT 12",
-          "refId": "A",
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE published_year IS NOT NULL) / greatest(count(*),1), 1) AS value FROM books",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -468,12 +584,592 @@
         }
       ],
       "options": {
-        "showHeader": true
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ISBN coverage",
+      "description": "",
+      "id": 212,
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 14
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE isbn13 IS NOT NULL) / greatest(count(*),1), 1) AS value FROM books",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Books added per hour",
+      "description": "",
+      "id": 213,
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) AS books FROM books WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 14,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Books by decade",
+      "description": "",
+      "id": 214,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ((published_year/10)*10)::text AS decade, count(*) AS books FROM books WHERE published_year IS NOT NULL GROUP BY 1 ORDER BY 1",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "orientation": "auto",
+        "showValue": "auto",
+        "xTickLabelRotation": -45,
+        "legend": {
+          "showLegend": false
+        }
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "align": "auto"
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Field coverage",
+      "description": "A missing field means no source supplied it, not that the value is zero.",
+      "id": 215,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 'publication year' AS field, count(*) FILTER (WHERE published_year IS NOT NULL) AS present, round(100.0*count(*) FILTER (WHERE published_year IS NOT NULL)/greatest(count(*),1),1) AS pct FROM books UNION ALL SELECT 'isbn-13', count(*) FILTER (WHERE isbn13 IS NOT NULL), round(100.0*count(*) FILTER (WHERE isbn13 IS NOT NULL)/greatest(count(*),1),1) FROM books UNION ALL SELECT 'description', count(*) FILTER (WHERE description IS NOT NULL), round(100.0*count(*) FILTER (WHERE description IS NOT NULL)/greatest(count(*),1),1) FROM books UNION ALL SELECT 'publisher', count(*) FILTER (WHERE publisher IS NOT NULL), round(100.0*count(*) FILTER (WHERE publisher IS NOT NULL)/greatest(count(*),1),1) FROM books UNION ALL SELECT 'cover image', count(*) FILTER (WHERE cover_url IS NOT NULL), round(100.0*count(*) FILTER (WHERE cover_url IS NOT NULL)/greatest(count(*),1),1) FROM books",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Provenance",
+      "id": 216,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Records per source",
+      "description": "",
+      "id": 217,
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT source, count(*) AS records, count(DISTINCT book_id) AS books, max(last_seen_at) AS last_seen FROM book_sources GROUP BY source ORDER BY records DESC",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Goodreads enriched",
+      "description": "Share of Goodreads records carrying the work-editions page \u2014 the only place a publication year appears. Was 0% until the Accept header was fixed.",
+      "id": 218,
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 9,
+        "y": 27
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE raw_payload ? '_edition') / greatest(count(*),1), 1) AS value FROM book_sources WHERE source='goodreads'",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 30
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Contested, unadjudicated",
+      "description": "Books whose sources disagree and that the tie-breaker has never seen.",
+      "id": 219,
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 14,
+        "y": 27
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM (SELECT b.id FROM books b JOIN book_sources bs ON bs.book_id=b.id WHERE NOT EXISTS (SELECT 1 FROM book_sources g WHERE g.book_id=b.id AND g.source='goodreads') GROUP BY b.id HAVING count(DISTINCT bs.source) > 1) t",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Rejected records",
+      "description": "",
+      "id": 220,
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 19,
+        "y": 27
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) AS value FROM rejected_records",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Runs",
+      "id": 221,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Oldest open run",
+      "description": "A run open for hours was killed rather than finished. Anything under an hour is usually just awaiting its consumers.",
+      "id": 222,
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT extract(epoch FROM now() - min(started_at)) AS value FROM ingestion_runs WHERE status IN ('running','processing')",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 3600
+              },
+              {
+                "color": "red",
+                "value": 43200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Recent ingestion runs",
+      "description": "",
+      "id": 223,
+      "gridPos": {
+        "h": 6,
+        "w": 10,
+        "x": 4,
+        "y": 34
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at, status, records_extracted AS extracted, records_loaded AS loaded, records_rejected AS rejected FROM ingestion_runs ORDER BY started_at DESC LIMIT 10",
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": false
           }
         },
         "overrides": []
@@ -482,23 +1178,24 @@
     {
       "type": "table",
       "title": "Airflow dag runs",
+      "description": "",
+      "id": 224,
       "gridPos": {
-        "h": 8,
+        "h": 6,
         "w": 10,
         "x": 14,
-        "y": 25
+        "y": 34
       },
-      "id": 10,
       "datasource": {
         "type": "postgres",
         "uid": "airflow"
       },
       "targets": [
         {
+          "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT start_date, dag_id, state FROM dag_run ORDER BY start_date DESC NULLS LAST LIMIT 12",
-          "refId": "A",
+          "rawSql": "SELECT start_date, dag_id, state, run_type FROM dag_run ORDER BY start_date DESC NULLS LAST LIMIT 10",
           "datasource": {
             "type": "postgres",
             "uid": "airflow"
@@ -506,12 +1203,14 @@
         }
       ],
       "options": {
-        "showHeader": true
+        "showHeader": true,
+        "cellHeight": "sm"
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "align": "auto"
+            "align": "auto",
+            "filterable": false
           }
         },
         "overrides": []
