@@ -20,6 +20,7 @@ from pipeline.transform.normalise import (
     parse_author_year,
     parse_year,
     select_language,
+    strip_marc_subfields,
 )
 
 
@@ -263,3 +264,66 @@ class TestRomanNumeralGuards:
 
     def test_an_empty_numeral_is_refused(self) -> None:
         assert _roman_to_int("") is None
+
+
+class TestMarcSubfieldDelimiters:
+    """Markup from the MARC records behind Open Library's dump.
+
+    "$b" introduces the remainder of a title and "$c" the statement of
+    responsibility. They are not words, and a catalogue showing "Telling
+    fortunes by cards : $b a symposium of..." is showing a reader its plumbing.
+    """
+
+    def test_a_subtitle_delimiter_is_removed(self) -> None:
+        title = "Telling fortunes by cards : $b a symposium of the several ancient methods"
+
+        assert strip_marc_subfields(title) == (
+            "Telling fortunes by cards : a symposium of the several ancient methods"
+        )
+
+    def test_the_isbd_punctuation_is_left_alone(self) -> None:
+        # "Title : subtitle" is how libraries write a title. Splitting it into
+        # two fields is a different decision with an identity change behind it.
+        assert strip_marc_subfields("Machine gun manual : $b a complete manual") == (
+            "Machine gun manual : a complete manual"
+        )
+
+    def test_the_dagger_form_is_handled(self) -> None:
+        assert strip_marc_subfields("Title ‡b with a dagger") == "Title with a dagger"
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "A$AP Rocky greatest hits",
+            "Priced at $5 and up",
+            "Ke$ha: the story",
+            "Money, money, money: the $ and the sense",
+        ],
+    )
+    def test_real_dollar_signs_survive(self, title: str) -> None:
+        """The failure mode a looser rule would introduce.
+
+        A bare "$<letter>" rule mauls A$AP; a case-insensitive one is worse.
+        MARC 21 specifies lowercase codes, so only those are matched, and only
+        when followed by whitespace.
+        """
+        assert strip_marc_subfields(title) == title
+
+    def test_a_plain_title_is_untouched(self) -> None:
+        assert strip_marc_subfields("Dune") == "Dune"
+
+    def test_none_stays_none(self) -> None:
+        assert strip_marc_subfields(None) is None
+
+    def test_a_title_of_only_markup_becomes_nothing(self) -> None:
+        # Rather than an empty string, which would read as a real title.
+        assert strip_marc_subfields("$b ") is None
+
+    def test_a_title_without_markup_is_returned_untouched(self) -> None:
+        """Not even whitespace is tidied.
+
+        Display values are preserved verbatim; this exists to remove markup,
+        not to become a general-purpose title cleaner that quietly rewrites
+        every record that passes through it.
+        """
+        assert strip_marc_subfields("The   GREAT   Gatsby") == "The   GREAT   Gatsby"

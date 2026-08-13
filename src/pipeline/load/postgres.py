@@ -348,27 +348,41 @@ class CatalogueLoader:
 
     # -- canonical recomputation ------------------------------------------
 
-    def _candidates(self, connection: Connection, book_id: int) -> list[CleanBook]:
-        """Replay every stored payload for this book through its source mapper.
+    def _replay(self, connection: Connection, book_id: int) -> tuple[Any, list[CleanBook]]:
+        """The book's own row and every stored payload, in one round trip.
 
-        Recomputing from provenance rather than from the record in hand is what
-        stops a later sparse record from erasing a richer earlier one.
+        These were two queries. Against a local socket that is 0.8ms and not
+        worth a thought; against a managed database it is 120ms on every book
+        the pipeline ever loads, and the loader is called once per record.
+
+        Replaying provenance rather than trusting the record in hand is what
+        stops a later sparse record erasing a richer earlier one, so the shape
+        stays: the join just fetches the arbiter alongside the evidence.
         """
         rows = connection.execute(
-            select(book_sources.c.source, book_sources.c.raw_payload)
-            .where(book_sources.c.book_id == book_id)
+            select(
+                books.c.identity_key,
+                books.c.content_hash,
+                book_sources.c.source,
+                book_sources.c.raw_payload,
+            )
+            .select_from(books.outerjoin(book_sources, book_sources.c.book_id == books.c.id))
+            .where(books.c.id == book_id)
             .order_by(book_sources.c.source, book_sources.c.source_id)
         ).all()
 
         candidates: list[CleanBook] = []
         for row in rows:
+            if row.source is None:
+                # The outer join's placeholder for a book with no provenance.
+                continue
             mapped = map_payload(SourceName(row.source), row.raw_payload)
             if isinstance(mapped, Rejected):
                 continue
             cleaned = canonicalise(mapped)
             if isinstance(cleaned, CleanBook):
                 candidates.append(cleaned)
-        return candidates
+        return (rows[0] if rows else None), candidates
 
     def _recompute(
         self,
@@ -378,15 +392,12 @@ class CatalogueLoader:
         run_id: UUID | None,
     ) -> None:
         """Recompute canonical fields and write only if they actually changed."""
-        candidates = self._candidates(connection, book_id)
-        if not candidates:
-            return
-
         # Candidates can disagree on identity once a merge has pulled a
-        # fallback book into an ISBN one. The book's own row is authoritative.
-        current = connection.execute(
-            select(books.c.identity_key, books.c.content_hash).where(books.c.id == book_id)
-        ).one()
+        # fallback book into an ISBN one. The book's own row is authoritative,
+        # and is read alongside them rather than in a second round trip.
+        current, candidates = self._replay(connection, book_id)
+        if current is None or not candidates:
+            return
         merged = merge_candidates(_agree_on_identity(candidates, current.identity_key))
 
         values: dict[str, Any] = {name: getattr(merged, name) for name in CANONICAL_FIELDS}

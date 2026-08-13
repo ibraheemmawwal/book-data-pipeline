@@ -70,6 +70,17 @@ x-airflow-common: &airflow-common
     # token" — which says nothing about the two containers disagreeing.
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-local-development-only}
     AIRFLOW__CORE__FERNET_KEY: ""
+    # No login on a stack that only ever answers on loopback. The session
+    # expiring every few hours while you are watching a run is friction with
+    # nothing on the other side of it: there is no multi-user story here and no
+    # secret in the UI that is not already in this file.
+    #
+    # This is only defensible together with the loopback bind on the apiserver
+    # port below. Docker publishes to 0.0.0.0 by default, so without that line
+    # this would hand an unauthenticated admin UI to everyone on the network.
+    # To keep a login instead, drop this and set:
+    #   AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
     <<: *pipeline-env
   volumes:
     - ./dags:/opt/airflow/dags:ro
@@ -167,7 +178,9 @@ services:
     <<: *airflow-common
     command: api-server
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      # Loopback only, deliberately. This is what makes running the UI without
+      # a login a local convenience rather than an open admin interface.
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
       interval: 10s

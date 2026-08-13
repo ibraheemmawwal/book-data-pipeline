@@ -29,6 +29,7 @@ from pipeline.transform.normalise import (
     normalise_title,
     parse_year,
     select_language,
+    strip_marc_subfields,
 )
 from pipeline.transform.series import canonicalise_series
 
@@ -78,7 +79,11 @@ def canonicalise(record: RawBook) -> CleanBook | Rejected:
     deduplicated, so admitting it would put an unreachable row in the
     catalogue.
     """
-    normalised_title = normalise_title(record.title)
+    # Cleaned before both uses: the comparison form and the identity digest are
+    # derived from the title, so leaving markup in one and not the other would
+    # split the same book across two identities.
+    display_title = strip_marc_subfields(record.title) or record.title
+    normalised_title = normalise_title(display_title)
     if normalised_title is None:
         return Rejected(
             source=record.source,
@@ -112,9 +117,9 @@ def canonicalise(record: RawBook) -> CleanBook | Rejected:
                 first_author=first_author,
                 year=published_year,
             ),
-            title=record.title,
+            title=display_title,
             normalised_title=normalised_title,
-            subtitle=record.subtitle,
+            subtitle=strip_marc_subfields(record.subtitle),
             isbn13=isbn13,
             published_year=published_year,
             page_count=record.page_count,

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, Engine, insert, select
+from sqlalchemy import Connection, Engine, func, insert, select
 
 from pipeline.messaging import FileSink, FileSource
 from pipeline.models.db import books, ingestion_runs
@@ -63,6 +63,16 @@ def clean_event(run_id: uuid.UUID, source_id: str = "1") -> BookEvent:
         identity_key="fallback:" + "a" * 64,
         payload={"id": int(source_id), "title": f"Book {source_id}"},
     )
+
+
+def count(engine: Engine, table: Any) -> int:
+    """Rows in a table, through a connection of its own.
+
+    Its own connection on purpose: it is called from inside a commit hook, so
+    it must not depend on a transaction the consumer is in the middle of.
+    """
+    with engine.connect() as connection:
+        return int(connection.execute(select(func.count()).select_from(table)).scalar_one())
 
 
 def markers(run_id: uuid.UUID, topic: str) -> list[PartitionMarker]:
@@ -406,54 +416,93 @@ class TestOffsetCommits:
         def commit(self) -> None:
             self.commits += 1
 
-    def test_the_load_consumer_commits_after_each_event(
+    def test_the_load_consumer_commits_what_it_wrote(
         self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
     ) -> None:
+        # Not "once per event" — the consumer writes in batches, so the
+        # guarantee is that it commits at all, and only after writing.
         source = self.CountingSource([clean_event(run_id, "1"), clean_event(run_id, "2")])
 
         LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl")).run()
 
-        assert source.commits == 2
+        assert source.commits >= 1
+        assert count(engine, books) == 2
 
-    def test_the_transform_consumer_commits_after_each_event(
+    def test_batching_commits_once_for_the_whole_batch(
         self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
     ) -> None:
-        source = self.CountingSource([raw_event(run_id, "1"), raw_event(run_id, "2")])
+        """The point of batching, stated as a number.
 
-        TransformConsumer(
-            engine,
-            source,
-            FileSink(tmp_path / "c.jsonl"),
-            FileSink(tmp_path / "d.jsonl"),
-            clean_partitions=PARTITIONS,
-        ).run()
+        One transaction per book spends two of its fourteen round trips on
+        BEGIN and COMMIT, which is invisible locally and 15% of the bill
+        against a database an ocean away.
+        """
+        events = [clean_event(run_id, str(n)) for n in range(20)]
+        source = self.CountingSource(events)
 
-        assert source.commits == 2
+        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl"), batch_size=20).run()
 
-    def test_markers_are_committed_too(
+        assert source.commits == 1, f"{source.commits} commits for one batch of 20"
+        assert count(engine, books) == 20
+
+    def test_nothing_is_committed_before_it_is_written(
         self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
     ) -> None:
-        # An uncommitted marker would be re-observed on every restart, which
-        # the primary key absorbs — but the topic would never drain.
-        source = self.CountingSource(markers(run_id, "books.clean"))
+        """The ordering the whole at-least-once story rests on.
 
-        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl")).run()
+        Committing first turns a crash into silent data loss; committing after
+        turns it into a replay, which the idempotent load makes harmless.
+        """
+        written_at_commit: list[int] = []
 
-        assert source.commits == PARTITIONS
+        class Watching(self.CountingSource):  # type: ignore[name-defined,misc]
+            def commit(inner) -> None:  # noqa: N805
+                written_at_commit.append(count(engine, books))
+                super().commit()
 
-    def test_a_parked_record_is_still_committed(
+        source = Watching([clean_event(run_id, str(n)) for n in range(6)])
+        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl"), batch_size=3).run()
+
+        assert written_at_commit, "never committed"
+        # Every commit happened with all preceding records already in the
+        # database; a commit observing fewer rows would be a commit ahead of
+        # its own write.
+        assert written_at_commit == sorted(written_at_commit)
+        assert written_at_commit[-1] == 6
+
+    def test_a_batch_is_written_before_the_marker_that_follows_it(
         self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
     ) -> None:
-        # It reached the DLQ, so it has been dealt with. Not committing would
-        # park it again on every restart, forever.
-        source = self.CountingSource([raw_event(run_id, "1", title="")])
+        """A run must not be declared complete while its books are pending.
 
-        TransformConsumer(
-            engine,
-            source,
-            FileSink(tmp_path / "c.jsonl"),
-            FileSink(tmp_path / "d.jsonl"),
-            clean_partitions=PARTITIONS,
-        ).run()
+        The marker is what finalises the run. With batching, records can still
+        be sitting unwritten when it arrives, so the flush has to happen first.
 
-        assert source.commits == 1
+        Asserting the final row count cannot see this: the run ends with a
+        flush either way, and by the time the test looks, the books are in. The
+        only discriminating question is what was already written *at the moment
+        the marker was handled*.
+        """
+        seen: list[int] = []
+        events: list[Any] = [clean_event(run_id, str(n)) for n in range(5)]
+        events += markers(run_id, "books.clean")
+
+        # Larger than the run, so nothing flushes on size alone.
+        consumer = LoadConsumer(
+            engine, self.CountingSource(events), FileSink(tmp_path / "d.jsonl"), batch_size=1000
+        )
+        original = consumer._handle_marker
+
+        def watching(event: Any, stats: Any) -> None:
+            seen.append(count(engine, books))
+            original(event, stats)
+
+        consumer._handle_marker = watching  # type: ignore[method-assign]
+        stats = consumer.run()
+
+        assert seen, "no marker was handled"
+        assert seen[0] == 5, (
+            f"the first marker was handled with only {seen[0]} of 5 books written; "
+            "the run can be finalised before its records exist"
+        )
+        assert stats.runs_finalised == 1

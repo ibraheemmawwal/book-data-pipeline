@@ -78,6 +78,37 @@ def _fold(value: str) -> str:
     return _WHITESPACE.sub(" ", text).strip().casefold()
 
 
+# MARC subfield delimiters, which Open Library's dump inherits from the MARC
+# records behind it: "$b" introduces the remainder of a title, "$c" the
+# statement of responsibility. They are markup, not words, and a catalogue that
+# shows "Telling fortunes by cards : $b a symposium of..." is showing its
+# plumbing to a reader.
+#
+# Only lowercase codes, and only when followed by whitespace, because the
+# alternative is eating real text: prices ("$5") are digits and safe either
+# way, but a bare "$b" rule would maul a title like "A$AP" and a case-insensitive
+# one would be worse. MARC 21 specifies lowercase, so that is what is matched.
+_MARC_SUBFIELD = re.compile(r"\s*[$|\u2021][a-z](?=\s)")
+
+
+def strip_marc_subfields(value: str | None) -> str | None:
+    """Remove MARC subfield delimiters from a display string.
+
+    The ISBD punctuation around them is left alone: "Title : subtitle" is how
+    libraries write a title, and rewriting that into two fields is a different
+    decision with an identity change behind it.
+    """
+    if value is None:
+        return None
+    if not _MARC_SUBFIELD.search(value):
+        # Untouched, deliberately. Display values are preserved verbatim —
+        # including odd spacing, which is the source's business — so this must
+        # not become a general-purpose tidier of every title that passes it.
+        return value
+    cleaned = _WHITESPACE.sub(" ", _MARC_SUBFIELD.sub("", value)).strip()
+    return cleaned or None
+
+
 def normalise_title(value: str | None) -> str | None:
     """A title's comparison form.
 
