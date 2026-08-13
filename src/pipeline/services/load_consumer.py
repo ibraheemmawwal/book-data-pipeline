@@ -35,12 +35,34 @@ from pipeline.transform import canonicalise
 
 logger = structlog.get_logger(__name__)
 
-# Records written per transaction. Each book costs about twelve statements, so
-# the transaction itself is only two round trips of fourteen — batching saves
-# that overhead, not the statements. Kept small because everything in a batch
-# is redelivered together if the process dies mid-write, and because a batch is
-# also the longest a record can sit unwritten.
-DEFAULT_LOAD_BATCH = 50
+# One record per transaction, measured rather than assumed.
+#
+# Batching fifty saves two round trips of fourteen — about 15% — and that is
+# genuinely what it does with a single writer. With three consumers it was 5x
+# *slower*: 22 books/minute against 109 for one-at-a-time.
+#
+# The cost is deadlock. A book's subjects go in as one multi-row upsert, so a
+# fifty-book transaction holds fifty books' worth of subject locks, and popular
+# subjects like "history" appear in most of them. Three writers then deadlock
+# constantly, and losing a deadlock replays the whole batch — fifty books of
+# work discarded to redo one. Short transactions hold few locks and lose
+# little when they do lose.
+#
+# Raise it only for a single-writer bulk load, where there is nothing to
+# contend with.
+DEFAULT_LOAD_BATCH = 1
+
+# How many records may go unaccounted before the tally is written.
+#
+# The tally is reporting, not correctness, and it was costing a whole
+# transaction per book — BEGIN, UPDATE, COMMIT on top of the twelve statements
+# the load itself needs. That is a quarter of the work to maintain a number
+# nobody reads mid-run: throughput went from 109 books/minute to 82.
+#
+# Accumulated in memory and written every so often instead. A run's final
+# figures are still exact, because the marker that ends it flushes the tally
+# before anything finalises; only an in-flight number lags, and by design.
+ACCOUNTING_FLUSH = 25
 
 
 @dataclass
@@ -72,6 +94,8 @@ class LoadConsumer:
         self._clean_topic = clean_topic
         self._loader = CatalogueLoader()
         self._batch_size = max(1, batch_size)
+        # run_id -> (loaded, rejected), awaiting a write.
+        self._tally: dict[Any, list[int]] = {}
 
     def sweep(self, stats: LoadStats) -> None:
         """Close any run whose markers all arrived before a previous restart."""
@@ -106,6 +130,9 @@ class LoadConsumer:
         for event in self._source.consume():
             if isinstance(event, PartitionMarker):
                 batch = self._flush(batch, batch_run, result)
+                # Before the marker: it may finalise the run, and a run must
+                # not close with records still uncounted.
+                self._write_tally()
                 self._handle_marker(event, result)
                 self._source.commit()
                 continue
@@ -133,6 +160,7 @@ class LoadConsumer:
         if batch:
             self._flush(batch, batch_run, result)
             self._source.commit()
+        self._write_tally()
         return result
 
     def _flush(self, batch: list[CleanBook], run_id: Any, stats: LoadStats) -> list[CleanBook]:
@@ -143,13 +171,30 @@ class LoadConsumer:
             if run_id is not None:
                 # Only what changed the catalogue, so a redelivered batch —
                 # which loads to "unchanged" by construction — adds nothing.
-                with self._engine.begin() as connection:
-                    record_loaded(
-                        connection,
-                        run_id,
-                        loaded=outcome.books_inserted + outcome.books_updated,
-                    )
+                self._count(run_id, loaded=outcome.books_inserted + outcome.books_updated)
         return []
+
+    def _count(self, run_id: Any, *, loaded: int = 0, rejected: int = 0) -> None:
+        """Add to the pending tally, writing it once it is worth a round trip."""
+        entry = self._tally.setdefault(run_id, [0, 0])
+        entry[0] += loaded
+        entry[1] += rejected
+        if entry[0] + entry[1] >= ACCOUNTING_FLUSH:
+            self._write_tally(run_id)
+
+    def _write_tally(self, run_id: Any = None) -> None:
+        """Persist pending counts, for one run or all of them."""
+        pending = (
+            {run_id: self._tally.pop(run_id)} if run_id in self._tally
+            else ({} if run_id is not None else dict(self._tally))
+        )
+        if run_id is None:
+            self._tally.clear()
+        if not pending:
+            return
+        with self._engine.begin() as connection:
+            for identifier, (loaded, rejected) in pending.items():
+                record_loaded(connection, identifier, loaded=loaded, rejected=rejected)
 
     def _prepare(self, event: BookEvent, stats: LoadStats) -> CleanBook | None:
         """Map and validate one event, parking it if it cannot be loaded."""
@@ -174,8 +219,7 @@ class LoadConsumer:
         self._dlq.flush()
         stats.rejected += 1
         if event.run_id is not None:
-            with self._engine.begin() as connection:
-                record_loaded(connection, event.run_id, rejected=1)
+            self._count(event.run_id, rejected=1)
         logger.warning("load.parked", code=code, source_id=event.source_id)
 
     def _handle_marker(self, marker: PartitionMarker, stats: LoadStats) -> None:

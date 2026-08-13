@@ -19,6 +19,7 @@ than a debugging luxury.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
@@ -28,6 +29,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import Connection, Engine, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 
 from pipeline.extract import Rejected, map_payload
 from pipeline.models.db import (
@@ -61,6 +63,24 @@ logger = structlog.get_logger(__name__)
 # One transaction per batch. Small enough that a failure does not roll back an
 # unbounded amount of work, large enough that per-statement overhead is noise.
 DEFAULT_BATCH_SIZE = 1000
+
+# PostgreSQL's own advice: a deadlock is a normal outcome of concurrent
+# writers, not a bug to design away, and the remedy is to retry the
+# transaction. Sorting each statement's rows makes it rarer — it cannot make it
+# impossible, because a batch issues one insert per book and two transactions
+# still interleave those in different orders.
+#
+# Retrying is only safe because loading is idempotent: the batch that half
+# succeeded rolled back entirely, and replaying it writes the same rows.
+DEADLOCK_RETRIES = 4
+_DEADLOCK_SQLSTATES = frozenset({"40P01", "40001"})
+
+
+def _is_deadlock(error: BaseException) -> bool:
+    """Whether this is a lock conflict worth retrying rather than reporting."""
+    sqlstate = getattr(getattr(error, "orig", None), "sqlstate", None)
+    return sqlstate in _DEADLOCK_SQLSTATES
+
 
 # Mirrors the columns recomputed from provenance. Kept explicit so adding a
 # canonical column is a deliberate decision rather than an accident of dir().
@@ -125,10 +145,51 @@ class CatalogueLoader:
         """
         total = LoadResult()
         for batch in _batched(records, self._batch_size):
-            with engine.begin() as connection:
-                for record in batch:
-                    self._load_one(connection, record, total, run_id)
+            self._load_batch(engine, batch, total, run_id)
         return total
+
+    def _load_batch(
+        self,
+        engine: Engine,
+        batch: list[CleanBook],
+        total: LoadResult,
+        run_id: UUID | None,
+    ) -> None:
+        """One batch, one transaction, retried if it loses a deadlock.
+
+        Counts accumulate into a throwaway result and are merged only once the
+        transaction commits. Adding them as records are processed would count
+        the half of a rolled-back batch that had already run, and a retry would
+        then report more books than exist.
+        """
+        for attempt in range(DEADLOCK_RETRIES + 1):
+            attempted = LoadResult()
+            try:
+                with engine.begin() as connection:
+                    for record in batch:
+                        self._load_one(connection, record, attempted, run_id)
+            except DBAPIError as error:
+                if not _is_deadlock(error) or attempt == DEADLOCK_RETRIES:
+                    raise
+                logger.warning(
+                    "load.deadlock_retry",
+                    attempt=attempt + 1,
+                    records=len(batch),
+                    detail="lost a lock race with another writer; replaying the batch",
+                )
+                # Brief, growing, and jittered by the batch's own size: two
+                # writers that back off by the same amount simply collide again.
+                time.sleep(0.05 * (attempt + 1) + (len(batch) % 7) * 0.01)
+                continue
+
+            total.books_inserted += attempted.books_inserted
+            total.books_updated += attempted.books_updated
+            total.books_unchanged += attempted.books_unchanged
+            total.sources_linked += attempted.sources_linked
+            total.merges += attempted.merges
+            total.rejected += attempted.rejected
+            total.rejections.extend(attempted.rejections)
+            return
 
     # -- one record ------------------------------------------------------
 
@@ -577,7 +638,7 @@ class CatalogueLoader:
                     "birth_year": author.birth_year,
                     "death_year": author.death_year,
                 }
-                for key, (author, _, _) in seen.items()
+                for key, (author, _, _) in sorted(seen.items())
             ]
         )
         rows = connection.execute(
@@ -602,10 +663,13 @@ class CatalogueLoader:
         connection.execute(
             insert(book_authors)
             .values(
-                [
-                    {"book_id": book_id, "author_id": author_ids[key], "position": position}
-                    for key, (_, _, position) in seen.items()
-                ]
+                sorted(
+                    (
+                        {"book_id": book_id, "author_id": author_ids[key], "position": position}
+                        for key, (_, _, position) in seen.items()
+                    ),
+                    key=lambda row: row["author_id"],
+                )
             )
             .on_conflict_do_nothing(index_elements=["book_id", "author_id"])
         )
@@ -618,7 +682,7 @@ class CatalogueLoader:
                 "source_birth_year": author.birth_year,
                 "source_death_year": author.death_year,
             }
-            for key, (author, source, _) in seen.items()
+            for key, (author, source, _) in sorted(seen.items())
             if author.source_author_id
         ]
         if source_rows:
@@ -652,8 +716,15 @@ class CatalogueLoader:
         if not wanted:
             return
 
+        # Sorted by the conflict key, which is the whole point rather than
+        # tidiness: a multi-row upsert takes its row locks in list order, and
+        # two consumers writing overlapping subjects in different orders each
+        # hold what the other is waiting for. That is a deadlock, and it took
+        # three consumers and a live backlog to find it — one writer never
+        # contends with itself, and the per-row loop this replaced could not
+        # deadlock because each statement held exactly one lock.
         statement = insert(subjects).values(
-            [{"name": name, "normalized_name": key} for key, name in wanted.items()]
+            [{"name": name, "normalized_name": key} for key, name in sorted(wanted.items())]
         )
         rows = connection.execute(
             statement.on_conflict_do_update(
@@ -667,7 +738,12 @@ class CatalogueLoader:
 
         connection.execute(
             insert(book_subjects)
-            .values([{"book_id": book_id, "subject_id": int(row.id)} for row in rows])
+            .values(
+                [
+                    {"book_id": book_id, "subject_id": subject_id}
+                    for subject_id in sorted(int(row.id) for row in rows)
+                ]
+            )
             .on_conflict_do_nothing(index_elements=["book_id", "subject_id"])
         )
 

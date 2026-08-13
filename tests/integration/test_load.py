@@ -7,12 +7,13 @@ ordering, so it can only be proven here.
 
 from __future__ import annotations
 
+import re
 import uuid
 from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, Engine, event, insert, select, text, update
+from sqlalchemy import Connection, Engine, event, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from pipeline.extract import goodreads, googlebooks, gutendex, openlibrary
@@ -1149,3 +1150,82 @@ class TestAMergeKeepsTheSeries:
 
         assert row.position == 3, "the merge kept the survivor's empty position"
         assert row.confirmed is True
+
+
+class TestConcurrentWritersDoNotDeadlock:
+    """Two writers, overlapping subjects, opposite orders.
+
+    A multi-row upsert takes its row locks in list order. Two consumers
+    inserting the same subjects in different orders each end up holding what
+    the other waits for, and PostgreSQL kills one of them.
+
+    This is only reachable because the writes were batched *and* the stack runs
+    three load consumers: one writer never contends with itself, and the
+    per-row loop that batching replaced could not deadlock because each
+    statement held exactly one lock. It took a live backlog to find, where the
+    consumers crash-looped and 7,700 messages piled up behind them.
+    """
+
+    @staticmethod
+    def _book(source_id: str, subjects: list[str]) -> CleanBook:
+        return _clean(
+            openlibrary.map_payload(
+                {
+                    "key": f"/works/{source_id}",
+                    "title": f"Book {source_id}",
+                    "subject": subjects,
+                    "language": ["eng"],
+                }
+            )
+        )
+
+    def test_subjects_are_locked_in_a_stable_order(self, engine: Engine) -> None:
+        """The property that makes concurrent writers safe.
+
+        Asserting "no deadlock" directly needs two real transactions racing;
+        what actually prevents it is that every writer sorts, so the statement
+        each one issues names the rows in the same sequence whatever order the
+        book listed them in.
+        """
+        forwards = ["algebra", "mathematics", "zoology"]
+        backwards = list(reversed(forwards))
+
+        statements: list[str] = []
+
+        def capture(conn: Any, cursor: Any, statement: str, *_args: Any) -> None:
+            if "INSERT INTO subjects" in statement:
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            CatalogueLoader().load(engine, [self._book("OLA", forwards)])
+            CatalogueLoader().load(engine, [self._book("OLB", backwards)])
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+        assert len(statements) == 2
+        params = [[v for k, v in sorted(_bound_names(s).items())] for s in statements]
+        assert params[0] == params[1], (
+            "the same subjects were named in different orders by two writers; "
+            "concurrent consumers will deadlock on them"
+        )
+
+    def test_both_books_still_get_all_their_subjects(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Sorting must not lose or misattribute anything.
+        loader = CatalogueLoader()
+        loader.load(engine, [self._book("OLC", ["physics", "astronomy"])])
+        loader.load(engine, [self._book("OLD", ["astronomy", "physics"])])
+
+        rows = connection.execute(select(func.count()).select_from(book_subjects)).scalar_one()
+        assert rows == 4
+        assert count(connection, subjects) == 2
+
+
+def _bound_names(statement: str) -> dict[str, str]:
+    """The ordered parameter placeholders in a compiled multi-row insert."""
+    return {
+        name: str(index)
+        for index, name in enumerate(re.findall(r"%\((normalized_name_m\d+)\)s", statement))
+    }
