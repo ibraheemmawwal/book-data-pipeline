@@ -72,6 +72,9 @@ ACCESS_DENIED_STATUS = frozenset({401, 403, 429})
 CHALLENGE_MARKERS = ("captcha", "are you a robot", "unusual traffic", "cf-challenge")
 
 MAX_DETAIL_ATTEMPTS = 3
+
+# The work editions page is HTML and 404s if asked for JSON.
+HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 MAX_RATING = Decimal(5)
 SERVER_ERROR_THRESHOLD = 500
 CLIENT_ERROR_THRESHOLD = 400
@@ -209,16 +212,37 @@ class GoodreadsExtractor:
             )
 
     async def _get(
-        self, client: httpx.AsyncClient, path: str, params: dict[str, Any] | None = None
+        self,
+        client: httpx.AsyncClient,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        accept: str | None = None,
     ) -> str:
-        """One rate-limited, single-in-flight request with a hard timeout."""
+        """One rate-limited, single-in-flight request with a hard timeout.
+
+        ``accept`` overrides the client default per request, which this source
+        genuinely requires: its bot mitigation answers the same client
+        differently depending on the header. The shared client asks for JSON,
+        which the autocomplete and book endpoints answer with 200 — and which
+        the work editions page answers with **404**. Not a redirect, not a
+        block, a plain 404 for a page that exists and returns 125KB of HTML the
+        moment the header changes.
+
+        That single header cost every publication year in the catalogue:
+        Goodreads publishes no year anywhere except that page, so 480 records
+        carried a workId, asked for its editions, were told the page did not
+        exist, and moved on without complaint.
+        """
         if self._circuit.opened:
             raise GoodreadsUnavailableError(f"circuit open: {self._circuit.reason}")
 
         async with self._gate:
             await self._bucket.acquire()
             try:
-                response = await client.get(path, params=params)
+                response = await client.get(
+                    path, params=params, headers={"Accept": accept} if accept else None
+                )
             except httpx.TransportError as error:
                 self._circuit.record_failure(f"transport: {type(error).__name__}")
                 raise GoodreadsUnavailableError(f"transport failure: {error}") from error
@@ -359,9 +383,13 @@ class GoodreadsExtractor:
         if not book_id:
             return observation
 
+        # Deliberately different Accept headers. The book page returns 200 for
+        # a JSON ask and 202 with an empty challenge body for a browser-like
+        # one; the editions page does the reverse. Neither is documented and
+        # both were established by measurement.
         paths = [self._get(client, f"/book/show/{book_id}")]
         if work_id:
-            paths.append(self._get(client, f"/work/editions/{work_id}"))
+            paths.append(self._get(client, f"/work/editions/{work_id}", accept=HTML_ACCEPT))
 
         results = await asyncio.gather(*paths, return_exceptions=True)
         book_html = results[0] if isinstance(results[0], str) else None

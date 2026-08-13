@@ -772,3 +772,63 @@ class TestIsbnSanityFloor:
         # Nothing to compare is not evidence of a mismatch.
         assert is_plausible_isbn_match("", "Anything")
         assert is_plausible_isbn_match("Anything", "")
+
+
+class TestTheAcceptHeaderPerEndpoint:
+    """One header, every publication year in the catalogue.
+
+    Goodreads' bot mitigation answers the same client differently depending on
+    what it asks for. The shared client requests JSON, which the autocomplete
+    and book endpoints answer with 200 — and which the work editions page
+    answers with 404. Not a redirect, not a block: a plain 404 for a page that
+    exists and returns 125KB of HTML the moment the header changes.
+
+    Goodreads publishes no year anywhere except that page, so 480 stored
+    records carried a workId, asked for its editions, were told it did not
+    exist, and moved on without complaint. Nothing failed and nothing said so.
+    """
+
+    @respx.mock
+    async def test_the_editions_page_is_asked_for_html(self, settings: Settings) -> None:
+        respx.get("https://www.goodreads.com/book/auto_complete").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "bookId": "1",
+                        "workId": "9",
+                        "bookTitleBare": "Dune",
+                        "author": {"name": "Frank Herbert"},
+                    }
+                ],
+            )
+        )
+        respx.get("https://www.goodreads.com/book/show/1").mock(
+            return_value=httpx.Response(200, text="<html></html>")
+        )
+        editions = respx.get("https://www.goodreads.com/work/editions/9").mock(
+            return_value=httpx.Response(200, text="<html></html>")
+        )
+
+        extractor = GoodreadsExtractor(settings)
+        async with extractor.build_client() as client:
+            await extractor.resolve(client, "Dune")
+
+        assert editions.called
+        accept = editions.calls[0].request.headers.get("accept", "")
+        assert "text/html" in accept, f"editions asked for {accept!r}; Goodreads 404s that"
+        assert accept != "application/json"
+
+    @respx.mock
+    async def test_autocomplete_still_asks_for_json(self, settings: Settings) -> None:
+        # The reverse mistake would be just as silent: the JSON endpoint
+        # returns HTML when asked for anything else.
+        auto = respx.get("https://www.goodreads.com/book/auto_complete").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        extractor = GoodreadsExtractor(settings)
+        async with extractor.build_client() as client:
+            await extractor.autocomplete(client, "Dune")
+
+        assert "application/json" in auto.calls[0].request.headers.get("accept", "")
