@@ -907,15 +907,57 @@ class TestASoftBlock:
                 await extractor._get(client, "/book/show/2657")
 
     @respx.mock
-    async def test_it_stops_the_run(self, extractor: GoodreadsExtractor) -> None:
-        # Spending the rest of a run collecting nothing is the failure mode.
+    async def test_one_empty_response_does_not_abandon_the_run(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        """One empty page proves a page is unusable, not that we are blocked.
+
+        Tripping on sight abandoned a run of 36 books over a single odd one,
+        which is inferring "blocked" from a sample of one.
+        """
         respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text="   "))
 
         async with extractor.build_client() as client:
             with pytest.raises(GoodreadsUnavailableError):
                 await extractor._get(client, "/book/show/2657")
 
+        assert not extractor.circuit_open
+
+    @respx.mock
+    async def test_a_run_of_empty_responses_does(self, extractor: GoodreadsExtractor) -> None:
+        """Consecutive ones are the evidence.
+
+        Measured live, a real block returned 202 and zero bytes for eight book
+        pages out of eight, so the threshold is reached almost immediately when
+        it genuinely is a block.
+        """
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text=""))
+
+        async with extractor.build_client() as client:
+            for _ in range(extractor._circuit.threshold):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await extractor._get(client, "/book/show/2657")
+
         assert extractor.circuit_open
+
+    @respx.mock
+    async def test_a_success_in_between_resets_the_count(
+        self, extractor: GoodreadsExtractor
+    ) -> None:
+        # Scattered empties across a healthy run must never accumulate into a
+        # false positive.
+        respx.get(url__regex=BOOK_SHOW).mock(return_value=httpx.Response(202, text=""))
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(200, json=[]))
+
+        async with extractor.build_client() as client:
+            for _ in range(extractor._circuit.threshold - 1):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await extractor._get(client, "/book/show/2657")
+            await extractor.autocomplete(client, "anything")
+            with pytest.raises(GoodreadsUnavailableError):
+                await extractor._get(client, "/book/show/2657")
+
+        assert not extractor.circuit_open
 
     @respx.mock
     async def test_a_small_but_real_answer_is_not_a_block(

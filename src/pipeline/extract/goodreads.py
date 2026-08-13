@@ -287,9 +287,17 @@ class GoodreadsExtractor:
             self._circuit.trip("challenge page returned")
             raise GoodreadsUnavailableError("challenge page returned")
         if _looks_empty(body):
-            # A block, not a thin page: stop for the run rather than spend the
-            # rest of it collecting nothing.
-            self._circuit.trip(f"empty body on HTTP {response.status_code}")
+            # Counted, not tripped on sight. One empty response proves a page
+            # is unusable; it does not prove the client is blocked, and
+            # inferring "blocked" from a sample of one abandons a run over a
+            # single odd book. Consecutive ones are the evidence — measured
+            # live, a real block returned 202 and zero bytes for eight book
+            # pages out of eight, so a run of three is reached almost at once
+            # when it genuinely is a block.
+            #
+            # record_failure resets on any success, so scattered empties across
+            # a healthy run never accumulate into a false positive.
+            self._circuit.record_failure(f"empty body on HTTP {response.status_code}")
             raise GoodreadsUnavailableError(
                 f"empty body on HTTP {response.status_code}",
                 status_code=response.status_code,
