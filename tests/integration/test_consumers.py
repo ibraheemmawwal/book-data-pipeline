@@ -24,6 +24,7 @@ from pipeline.models.db import books, ingestion_runs
 from pipeline.models.domain import SourceName
 from pipeline.models.events import BookEvent, EventType, PartitionMarker
 from pipeline.observability.markers import freeze_topology, mark_processing
+from pipeline.observability.runs import start_run
 from pipeline.services import LoadConsumer, TransformConsumer
 
 pytestmark = pytest.mark.integration
@@ -506,3 +507,69 @@ class TestOffsetCommits:
             "the run can be finalised before its records exist"
         )
         assert stats.runs_finalised == 1
+
+
+class TestRunAccounting:
+    """What a finished run says it did.
+
+    A run that loaded thousands of books reported extracted=0 loaded=0, because
+    on the Kafka path the task that resolves does not load and the consumer
+    that loads does not close the run. Nothing was wrong with the pipeline and
+    everything was wrong with the number an operator checks first.
+    """
+
+    def test_the_boundary_records_what_was_published(self, engine: Engine) -> None:
+        # Its own run, opened as 'running': mark_processing is guarded on that
+        # status so a redelivered boundary cannot re-time a closed run.
+        with engine.begin() as connection:
+            identifier = start_run(connection, "boundary-test")
+            mark_processing(connection, identifier, records_extracted=1234)
+
+        with engine.connect() as connection:
+            extracted = connection.execute(
+                select(ingestion_runs.c.records_extracted).where(ingestion_runs.c.id == identifier)
+            ).scalar_one()
+        assert extracted == 1234
+
+    def test_the_consumer_records_what_it_loaded(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        source = self.__class__._Source([clean_event(run_id, str(n)) for n in range(3)])
+        LoadConsumer(engine, source, FileSink(tmp_path / "d.jsonl")).run()
+
+        with engine.connect() as connection:
+            loaded = connection.execute(
+                select(ingestion_runs.c.records_loaded).where(ingestion_runs.c.id == run_id)
+            ).scalar_one()
+        assert loaded == 3
+
+    def test_a_redelivered_batch_does_not_inflate_the_count(
+        self, engine: Engine, tmp_path: Path, run_id: uuid.UUID
+    ) -> None:
+        """The reason only changes are counted.
+
+        At-least-once delivery means a batch can arrive twice. A replay loads
+        to "unchanged" by construction — that is the idempotency guarantee — so
+        it must add nothing, where counting everything processed would report
+        double the books on every retry.
+        """
+        events = [clean_event(run_id, str(n)) for n in range(3)]
+
+        LoadConsumer(engine, self.__class__._Source(events), FileSink(tmp_path / "d.jsonl")).run()
+        LoadConsumer(engine, self.__class__._Source(events), FileSink(tmp_path / "d.jsonl")).run()
+
+        with engine.connect() as connection:
+            loaded = connection.execute(
+                select(ingestion_runs.c.records_loaded).where(ingestion_runs.c.id == run_id)
+            ).scalar_one()
+        assert loaded == 3, f"redelivery inflated the tally to {loaded}"
+
+    class _Source:
+        def __init__(self, events: list[Any]) -> None:
+            self._events = events
+
+        def consume(self) -> Any:
+            yield from self._events
+
+        def commit(self) -> None:
+            return None

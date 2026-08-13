@@ -11,6 +11,7 @@ long a consumer has been alive.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -125,16 +126,48 @@ def runs_awaiting(connection: Connection, topic: str) -> list[UUID]:
     return list(rows)
 
 
-def mark_processing(connection: Connection, run_id: UUID) -> None:
+def mark_processing(
+    connection: Connection, run_id: UUID, *, records_extracted: int | None = None
+) -> None:
     """Move a run from ``running`` to ``processing``.
 
     The DAG finishes when extraction does; the consumers carry the run from
-    there, and this is the handover.
+    there, and this is the handover — which makes it the only moment anything
+    knows how many observations were published. Recording it here is why a
+    finished run can say what it produced instead of reporting zero.
     """
+    values: dict[str, Any] = {"status": "processing", "extraction_ended_at": func.now()}
+    if records_extracted is not None:
+        values["records_extracted"] = records_extracted
     connection.execute(
         update(ingestion_runs)
         .where(ingestion_runs.c.id == run_id, ingestion_runs.c.status == "running")
-        .values(status="processing", extraction_ended_at=func.now())
+        .values(**values)
+    )
+
+
+def record_loaded(
+    connection: Connection, run_id: UUID, *, loaded: int = 0, rejected: int = 0
+) -> None:
+    """Add to a run's load tally.
+
+    Additive because the consumers are plural: three of them write the same
+    run's books from three partitions, and no one of them can state the total.
+
+    Counting only records that *changed* the catalogue is what makes this safe
+    under redelivery. A replayed batch loads to ``unchanged`` by construction —
+    that is the idempotency guarantee — so it adds nothing here, where a naive
+    count of everything processed would inflate the total on every retry.
+    """
+    if not loaded and not rejected:
+        return
+    connection.execute(
+        update(ingestion_runs)
+        .where(ingestion_runs.c.id == run_id)
+        .values(
+            records_loaded=func.coalesce(ingestion_runs.c.records_loaded, 0) + loaded,
+            records_rejected=func.coalesce(ingestion_runs.c.records_rejected, 0) + rejected,
+        )
     )
 
 

@@ -52,7 +52,13 @@ def build_load_consumer(settings: Settings, engine: Engine | None = None) -> Loa
     )
 
 
-def emit_run_boundary(settings: Settings, run_id: UUID, engine: Engine | None = None) -> int:
+def emit_run_boundary(
+    settings: Settings,
+    run_id: UUID,
+    engine: Engine | None = None,
+    *,
+    records_extracted: int | None = None,
+) -> int:
     """Close a run's raw topic: freeze the topology, then emit the markers.
 
     Order matters. The expectation is written first so a consumer that sees a
@@ -69,7 +75,7 @@ def emit_run_boundary(settings: Settings, run_id: UUID, engine: Engine | None = 
     with active.begin() as connection:
         freeze_topology(connection, run_id, settings.kafka_raw_topic, partitions)
         freeze_topology(connection, run_id, settings.kafka_clean_topic, partitions)
-        mark_processing(connection, run_id)
+        mark_processing(connection, run_id, records_extracted=records_extracted)
 
     sink = KafkaSink(settings.kafka_bootstrap_servers, settings.kafka_raw_topic)
     sink.emit(

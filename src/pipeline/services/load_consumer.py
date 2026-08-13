@@ -24,7 +24,12 @@ from pipeline.load import CatalogueLoader
 from pipeline.messaging.contracts import Sink, Source
 from pipeline.models.domain import CleanBook
 from pipeline.models.events import BookEvent, PartitionMarker
-from pipeline.observability.markers import finalise_if_complete, record_marker, runs_awaiting
+from pipeline.observability.markers import (
+    finalise_if_complete,
+    record_loaded,
+    record_marker,
+    runs_awaiting,
+)
 from pipeline.services.transform_consumer import dlq_event
 from pipeline.transform import canonicalise
 
@@ -135,6 +140,15 @@ class LoadConsumer:
         if batch:
             outcome = self._loader.load(self._engine, batch, run_id=run_id)
             stats.loaded += outcome.records_loaded
+            if run_id is not None:
+                # Only what changed the catalogue, so a redelivered batch —
+                # which loads to "unchanged" by construction — adds nothing.
+                with self._engine.begin() as connection:
+                    record_loaded(
+                        connection,
+                        run_id,
+                        loaded=outcome.books_inserted + outcome.books_updated,
+                    )
         return []
 
     def _prepare(self, event: BookEvent, stats: LoadStats) -> CleanBook | None:
@@ -159,6 +173,9 @@ class LoadConsumer:
         self._dlq.emit([dlq_event(event, code, detail, 1)])
         self._dlq.flush()
         stats.rejected += 1
+        if event.run_id is not None:
+            with self._engine.begin() as connection:
+                record_loaded(connection, event.run_id, rejected=1)
         logger.warning("load.parked", code=code, source_id=event.source_id)
 
     def _handle_marker(self, marker: PartitionMarker, stats: LoadStats) -> None:

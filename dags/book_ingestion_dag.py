@@ -345,7 +345,11 @@ def book_ingestion() -> None:
         from pipeline.config import Settings
         from pipeline.services import emit_run_boundary as emit
 
-        partitions = emit(Settings(), UUID(outcome["run_id"]))
+        partitions = emit(
+            Settings(),
+            UUID(outcome["run_id"]),
+            records_extracted=outcome.get("observations"),
+        )
         return {**outcome, "partitions": partitions}
 
     @task
