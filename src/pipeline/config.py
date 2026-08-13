@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Self
 
+import structlog
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,7 +31,12 @@ from pipeline.models.domain import SourceName
 
 __all__ = ["Settings", "SourceName"]
 
+logger = structlog.get_logger(__name__)
+
 REPOSITORY_URL = "https://github.com/ibraheemmawwal/book-data-pipeline"
+
+# Addresses that look like a contact and are not one.
+PLACEHOLDER_CONTACTS = frozenset({"you@example.com", "user@example.com", "test@example.com"})
 
 # The load stage commits one transaction per batch; the TRD caps that at 1,000
 # records so a failure never rolls back an unbounded amount of work.
@@ -303,9 +309,25 @@ class Settings(BaseSettings):
 
         Carries the contact address when Open Library is in play, because that
         is the source whose policy requires it.
+
+        A placeholder address is worse than a missing one: it satisfies the
+        letter of "identify yourself" while reaching nobody, which is the
+        opposite of the point. It is left in the header rather than stripped —
+        removing it would hide the misconfiguration from the one party who
+        would notice — but it is announced on every construction, because a
+        stack that has been quietly rude for a week is the failure here.
         """
         identity = f"book-data-pipeline/{__version__} (+{REPOSITORY_URL}"
         if self.openlibrary_enabled and self.openlibrary_contact_email:
+            if self.openlibrary_contact_email in PLACEHOLDER_CONTACTS:
+                logger.warning(
+                    "config.placeholder_contact_email",
+                    contact=self.openlibrary_contact_email,
+                    detail=(
+                        "Open Library asks to be told who is calling; this address "
+                        "reaches nobody. Set PIPELINE_OPENLIBRARY_CONTACT_EMAIL."
+                    ),
+                )
             identity += f"; {self.openlibrary_contact_email}"
         return identity + ")"
 

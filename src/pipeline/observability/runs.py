@@ -8,7 +8,7 @@ run stopped and where".
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, func, update
@@ -17,13 +17,48 @@ from sqlalchemy.dialects.postgresql import insert
 from pipeline.models.db import ingestion_runs, source_runs
 from pipeline.models.domain import SourceName
 
+# Longer than any real run, so a sweep can never close a live one. The longest
+# observed is a 5000-candidate ingestion at roughly an hour.
+STALE_RUN_AGE = timedelta(hours=12)
+
+
+def abandon_stale_runs(connection: Connection, *, older_than: timedelta = STALE_RUN_AGE) -> int:
+    """Close runs left ``running`` by a kill, and say how many.
+
+    A run that is killed rather than raising — a container restart, a task
+    adopted after a scheduler bounce, an OOM — never reaches its own exception
+    handler, so its row stays ``running`` for good. Five had accumulated in the
+    live catalogue, two of them more than a day old, each claiming work was in
+    progress when nothing was.
+
+    Age is the test, and it has to be: the tempting version closes every
+    ``running`` row on the grounds that ``max_active_runs=1`` means only one
+    can be live. That is per *DAG*. Contested resolution opens runs too, so a
+    tie-breaking run starting would have marked a live ingestion failed —
+    turning a cosmetic leak into a lie about the run that mattered.
+
+    Runs that reached the consumers are ``processing``, not ``running``, and
+    are left alone: those genuinely are still in flight.
+    """
+    cutoff = datetime.now(UTC) - older_than
+    result = connection.execute(
+        update(ingestion_runs)
+        .where(ingestion_runs.c.status == "running", ingestion_runs.c.started_at < cutoff)
+        .values(status="failed", extraction_ended_at=func.now(), processing_ended_at=func.now())
+    )
+    return int(result.rowcount or 0)
+
 
 def start_run(connection: Connection, dag_run_id: str | None = None) -> UUID:
     """Open a run and return its id.
 
     ``dag_run_id`` is unique, so a CLI run gets a ``cli:<uuid4>`` label rather
     than colliding with Airflow's.
+
+    Any run left open by a previous kill is closed first, so "running" means
+    running.
     """
+    abandon_stale_runs(connection)
     run_id = uuid4()
     connection.execute(
         insert(ingestion_runs).values(

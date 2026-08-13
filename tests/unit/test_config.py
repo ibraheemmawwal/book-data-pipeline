@@ -9,6 +9,7 @@ import os
 
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from pipeline.config import Settings, SourceName
 
@@ -234,3 +235,40 @@ class TestDiscoverySettings:
 
     def test_an_absent_digest_is_allowed(self) -> None:
         assert settings().openlibrary_dump_sha256 is None
+
+
+class TestThePlaceholderContact:
+    """A contact address that reaches nobody.
+
+    Open Library's guidance asks to be told who is calling, and the whole basis
+    on which this pipeline uses it is that it identifies itself. A placeholder
+    satisfies the letter of that and none of the point — and it had been going
+    out on every request for a week without anything saying so.
+    """
+
+    @staticmethod
+    def _settings(contact: str) -> Settings:
+        return Settings(  # type: ignore[call-arg]
+            database_url="postgresql+psycopg://u:p@localhost/db",
+            openlibrary_contact_email=contact,
+        )
+
+    def test_it_warns(self) -> None:
+        with capture_logs() as logs:
+            self._settings("you@example.com").user_agent()
+
+        assert any(entry["event"] == "config.placeholder_contact_email" for entry in logs)
+
+    def test_a_real_address_is_silent(self) -> None:
+        with capture_logs() as logs:
+            self._settings("someone@somewhere.org").user_agent()
+
+        assert not any(entry["event"] == "config.placeholder_contact_email" for entry in logs)
+
+    def test_the_address_is_still_sent(self) -> None:
+        """Not stripped, deliberately.
+
+        Removing it would hide the misconfiguration from the one party in a
+        position to notice it.
+        """
+        assert "you@example.com" in self._settings("you@example.com").user_agent()

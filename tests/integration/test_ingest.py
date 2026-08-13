@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from pipeline.models.db import (
 )
 from pipeline.models.domain import CandidateBook
 from pipeline.models.events import EventType
+from pipeline.observability.runs import abandon_stale_runs, finalise_run, start_run
 
 pytestmark = pytest.mark.integration
 
@@ -410,3 +412,79 @@ class TestUnresolvedCandidates:
         assert report.unresolved == 1
         assert report.observations == 0
         assert sink_records == []
+
+
+def _age(connection: Connection, run_id: Any, *, hours: int) -> None:
+    """Backdate a run so the staleness sweep can see it."""
+    connection.execute(
+        ingestion_runs.update()
+        .where(ingestion_runs.c.id == run_id)
+        .values(started_at=datetime.now(UTC) - timedelta(hours=hours))
+    )
+
+
+class TestRunsLeftOpenByAKill:
+    """A run that was killed rather than raising.
+
+    A container restart, a scheduler bounce that re-adopts a task, an OOM: none
+    of them reach the run's own exception handler, so the row stays ``running``
+    forever. Five had accumulated in the live catalogue, two of them more than
+    a day old, each claiming work was in progress when nothing was.
+
+    Closing them is safe because ``max_active_runs=1`` — a new run starting is
+    proof that no older one is still going.
+    """
+
+    def test_a_new_run_closes_the_one_a_kill_left_open(self, connection: Connection) -> None:
+        killed = start_run(connection, "killed-by-restart")
+        _age(connection, killed, hours=20)
+
+        start_run(connection, "the-next-one")
+
+        state = connection.execute(
+            select(ingestion_runs.c.status).where(ingestion_runs.c.id == killed)
+        ).scalar_one()
+        assert state == "failed"
+
+    def test_the_new_run_is_still_running(self, connection: Connection) -> None:
+        # The sweep must not close the run that just opened.
+        current = start_run(connection, "current")
+
+        state = connection.execute(
+            select(ingestion_runs.c.status).where(ingestion_runs.c.id == current)
+        ).scalar_one()
+        assert state == "running"
+
+    def test_finished_runs_are_not_touched(self, connection: Connection) -> None:
+        done = start_run(connection, "already-done")
+        finalise_run(connection, done, status="success")
+
+        start_run(connection, "next")
+
+        state = connection.execute(
+            select(ingestion_runs.c.status).where(ingestion_runs.c.id == done)
+        ).scalar_one()
+        assert state == "success"
+
+    def test_it_reports_how_many_it_closed(self, connection: Connection) -> None:
+        old = start_run(connection, "one")
+        _age(connection, old, hours=20)
+        start_run(connection, "two")
+
+        assert abandon_stale_runs(connection) == 0, "the sweep already ran on start"
+
+    def test_a_run_still_in_flight_is_left_alone(self, connection: Connection) -> None:
+        """The bug the age test exists to prevent.
+
+        max_active_runs=1 is per DAG. Contested resolution opens runs of its
+        own, so a tie-breaking run starting would otherwise mark a live
+        ingestion failed.
+        """
+        live = start_run(connection, "ingestion-in-flight")
+
+        start_run(connection, "contested-starting-alongside-it")
+
+        state = connection.execute(
+            select(ingestion_runs.c.status).where(ingestion_runs.c.id == live)
+        ).scalar_one()
+        assert state == "running"
