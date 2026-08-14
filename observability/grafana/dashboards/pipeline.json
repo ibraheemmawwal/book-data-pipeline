@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 5,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -846,7 +846,7 @@
       "id": 217,
       "gridPos": {
         "h": 6,
-        "w": 13,
+        "w": 8,
         "x": 0,
         "y": 27
       },
@@ -882,13 +882,13 @@
     },
     {
       "type": "stat",
-      "title": "Goodreads enriched (fetched records)",
-      "description": "Share of Goodreads records that were fetched from the site and carry the work-editions page, which is the only place a publication year appears. Records imported from an export file are excluded: they were never fetched, so counting them would divide by a population that cannot be enriched \u2014 which is what turned 25% into 1% overnight when 10,000 arrived at once.",
+      "title": "Goodreads enriched",
+      "description": "Share of all Goodreads records carrying the work-editions page, which is the only place a publication year appears. It reads low because 9,997 records arrived from an export and have never been fetched \u2014 see the panel beside this one. Measured against fetched records alone it is about 25%, but that denominator flatters: those 9,997 genuinely have no year, and the catalogue is what it is.",
       "id": 218,
       "gridPos": {
         "h": 6,
         "w": 4,
-        "x": 9,
+        "x": 8,
         "y": 27
       },
       "datasource": {
@@ -900,7 +900,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE raw_payload ? '_edition') / greatest(count(*), 1), 1) AS value FROM book_sources WHERE source='goodreads' AND NOT (raw_payload ? '_export')",
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE raw_payload ? '_edition') / greatest(count(*), 1), 1) AS value FROM book_sources WHERE source='goodreads'",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -927,16 +927,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
-              },
-              {
-                "color": "#EAB839",
-                "value": 30
-              },
-              {
-                "color": "green",
-                "value": 80
               }
             ]
           }
@@ -951,8 +943,8 @@
       "id": 219,
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 13,
+        "w": 4,
+        "x": 16,
         "y": 27
       },
       "datasource": {
@@ -1007,8 +999,8 @@
       "id": 220,
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 19,
+        "w": 4,
+        "x": 20,
         "y": 27
       },
       "datasource": {
@@ -1749,8 +1741,8 @@
       "description": "Goodreads records that came from an export file. They carry a title, authors, a rating and a cover, and no year or ISBN \u2014 those need the book's own page. This is the backlog for enrichment, not a fault.",
       "gridPos": {
         "h": 6,
-        "w": 5,
-        "x": 18,
+        "w": 4,
+        "x": 12,
         "y": 27
       },
       "datasource": {

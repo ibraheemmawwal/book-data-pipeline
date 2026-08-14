@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     contested_min_conflicts: Annotated[int, Field(ge=1)] = 2
     contested_max_per_run: Annotated[int, Field(ge=0)] = 25
 
+    # How many imported Goodreads records one enrichment run completes. Small
+    # and hourly: the backlog is finite and not urgent, and a slice that clears
+    # ten thousand in two days never looks like a crawl.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 200
+
     enrich_from_documented_sources: bool = False
 
     googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500
