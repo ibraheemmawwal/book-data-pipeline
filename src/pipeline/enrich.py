@@ -107,10 +107,11 @@ async def _enrich_all(
     try:
         for record in records:
             if extractor.circuit_open:
-                # Once it has refused us repeatedly, stop for the run. The
-                # backlog is not going anywhere and the block is rate-based.
-                report.refused = True
-                report.errors.append("circuit opened; stopping")
+                # Stop for the run either way — the backlog is not going
+                # anywhere. Only a refusal earns the cross-run cooldown: a run
+                # ended by upstream 5xx should let the next one try.
+                report.refused = extractor.refused
+                report.errors.append(f"circuit opened: {extractor.circuit_reason}")
                 break
 
             observation = map_payload(SourceName.GOODREADS, record["payload"])

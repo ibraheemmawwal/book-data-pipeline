@@ -216,10 +216,10 @@ async def _run(
     try:
         for book in books:
             if extractor.circuit_open:
-                # Once it has refused us, stop for the run. Re-probing a source
-                # that pushed back is exactly what the containment rules forbid.
-                report.refused = True
-                report.errors.append("circuit opened; stopping")
+                # Stop for the run either way. Only a refusal earns the
+                # cross-run cooldown; upstream 5xx is not a decision about us.
+                report.refused = extractor.refused
+                report.errors.append(f"circuit opened: {extractor.circuit_reason}")
                 break
 
             report.queried += 1

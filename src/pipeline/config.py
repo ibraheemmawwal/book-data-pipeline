@@ -211,6 +211,11 @@ class Settings(BaseSettings):
     # Hard timeout: an unofficial contract must never hold a run open.
     goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0
     goodreads_circuit_failure_threshold: Annotated[int, Field(ge=1)] = 5
+    # Retries for a transient failure — 5xx or a dropped connection — before it
+    # counts against the breaker at all. Goodreads currently serves 503 to
+    # about one request in three while answering the rest in full, and those
+    # 503s cluster, so without this an ordinary wobble reads as a block.
+    goodreads_transient_retries: Annotated[int, Field(ge=0, le=10)] = 3
     # How long every path stays away after Goodreads refuses us.
     #
     # The breaker stops one run; this stops the next one. Airflow gives each

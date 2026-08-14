@@ -54,6 +54,10 @@ def accepted(settings: Settings) -> Settings:
             "goodreads_enabled": True,
             "goodreads_unofficial_source_accepted": True,
             "goodreads_circuit_failure_threshold": 2,
+            # These exercise the breaker, so transient retries are off: with
+            # them on a 503 never reaches the breaker, which is the point of
+            # the retries and would make these tests measure nothing.
+            "goodreads_transient_retries": 0,
         }
     )
 
@@ -1127,3 +1131,141 @@ class TestCompletingARecordFromABareId:
 
         assert book is not None
         assert book.publisher is not None
+
+
+@pytest.fixture
+def retrying(accepted: Settings) -> GoodreadsExtractor:
+    """An extractor with the real retry budget and no waiting."""
+
+    async def no_wait(_: float) -> None:
+        return None
+
+    return GoodreadsExtractor(
+        accepted.model_copy(update={"goodreads_transient_retries": 3}), sleep=no_wait
+    )
+
+
+class TestTransientFailuresAreNotRefusals:
+    """A 503 is the source failing, not the source deciding about us.
+
+    Measured live: Goodreads served 503 to one request in three while answering
+    the other two with a complete page, and those 503s clustered — a sample of
+    twelve contained a run of three against a breaker threshold of five. Read as
+    a block, an ordinary wobble stopped the run and then kept every DAG away for
+    ninety minutes from a source that was talking to us.
+    """
+
+    @respx.mock
+    async def test_a_lone_503_is_retried_not_counted(self, retrying: GoodreadsExtractor) -> None:
+        route = respx.get(AUTOCOMPLETE).mock(
+            side_effect=[httpx.Response(503), httpx.Response(200, json=[])]
+        )
+
+        async with retrying.build_client() as client:
+            await retrying.autocomplete(client, "dune")
+
+        assert route.call_count == 2
+        assert not retrying.circuit_open
+
+    @respx.mock
+    async def test_a_cluster_shorter_than_the_budget_survives(
+        self, retrying: GoodreadsExtractor
+    ) -> None:
+        # The run of three actually observed, against three retries.
+        respx.get(AUTOCOMPLETE).mock(
+            side_effect=[
+                httpx.Response(503),
+                httpx.Response(503),
+                httpx.Response(503),
+                httpx.Response(200, json=[]),
+            ]
+        )
+
+        async with retrying.build_client() as client:
+            await retrying.autocomplete(client, "dune")
+
+        assert not retrying.circuit_open
+
+    @respx.mock
+    async def test_exhausted_retries_open_the_circuit_but_not_as_a_refusal(
+        self, retrying: GoodreadsExtractor
+    ) -> None:
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(503))
+
+        async with retrying.build_client() as client:
+            for _ in range(2):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await retrying.autocomplete(client, "dune")
+
+        # The run stops — but the next one must be free to try, because
+        # nothing here was a decision about us.
+        assert retrying.circuit_open
+        assert not retrying.refused
+
+    @respx.mock
+    async def test_a_transport_failure_is_transient_too(self, retrying: GoodreadsExtractor) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            side_effect=[httpx.ConnectError("boom"), httpx.Response(200, json=[])]
+        )
+
+        async with retrying.build_client() as client:
+            await retrying.autocomplete(client, "dune")
+
+        assert not retrying.circuit_open
+
+
+class TestRealRefusalsStillCount:
+    @respx.mock
+    async def test_access_denied_trips_immediately_as_a_refusal(
+        self, retrying: GoodreadsExtractor
+    ) -> None:
+        route = respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(403))
+
+        async with retrying.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError):
+                await retrying.autocomplete(client, "dune")
+
+        # Never retried: repeating a block is the behaviour the containment
+        # rules forbid, and it would turn one refusal into four.
+        assert route.call_count == 1
+        assert retrying.refused
+
+    @respx.mock
+    async def test_a_challenge_page_is_a_refusal(self, retrying: GoodreadsExtractor) -> None:
+        respx.get(AUTOCOMPLETE).mock(
+            return_value=httpx.Response(200, text="please complete the captcha")
+        )
+
+        async with retrying.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError):
+                await retrying.autocomplete(client, "dune")
+
+        assert retrying.refused
+
+    @respx.mock
+    async def test_repeated_empty_bodies_are_a_refusal(self, retrying: GoodreadsExtractor) -> None:
+        # The signature of the real block: 202 with zero bytes, eight pages
+        # out of eight.
+        respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(202, text=""))
+
+        async with retrying.build_client() as client:
+            for _ in range(2):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await retrying.autocomplete(client, "dune")
+
+        assert retrying.refused
+
+    @respx.mock
+    async def test_a_404_is_neither_retried_nor_counted(self, retrying: GoodreadsExtractor) -> None:
+        # About the page, not about us. Retrying only reconfirms that the book
+        # does not exist, and counting it would let a run of dead records in
+        # the backlog look exactly like a block.
+        route = respx.get(AUTOCOMPLETE).mock(return_value=httpx.Response(404))
+
+        async with retrying.build_client() as client:
+            for _ in range(4):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await retrying.autocomplete(client, "dune")
+
+        assert route.call_count == 4
+        assert not retrying.circuit_open

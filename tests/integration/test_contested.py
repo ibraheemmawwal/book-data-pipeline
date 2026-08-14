@@ -351,6 +351,14 @@ class TestWhenTheTieBreakerMisbehaves:
             def circuit_open(self) -> bool:
                 return opened["value"]
 
+            @property
+            def refused(self) -> bool:
+                return opened["value"]
+
+            @property
+            def circuit_reason(self) -> str:
+                return "access denied: HTTP 403"
+
             def ensure_accepted(self) -> None:
                 return None
 

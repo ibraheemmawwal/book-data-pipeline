@@ -83,6 +83,9 @@ MAX_DETAIL_ATTEMPTS = 3
 HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 MAX_RATING = Decimal(5)
 SERVER_ERROR_THRESHOLD = 500
+# First retry waits this long, then it doubles. On top of the rate limiter's
+# own spacing, so three retries span roughly fourteen seconds.
+TRANSIENT_BACKOFF_SECONDS = 1.0
 CLIENT_ERROR_THRESHOLD = 400
 
 
@@ -103,30 +106,45 @@ class GoodreadsNotAcceptedError(Exception):
 
 @dataclass
 class _CircuitBreaker:
-    """Stops hammering a source that is refusing us.
+    """Stops hammering a source that is refusing us, or that is failing.
 
     Opened by repeated access failures or contract failures. Once open it stays
     open for the run: re-probing a site that has blocked us is exactly the
     behaviour the containment rules forbid.
+
+    ``refused`` separates the two reasons it can open, because they call for
+    different responses and conflating them cost us a working pipeline. A 403,
+    a challenge page or a run of empty bodies is Goodreads making a decision
+    about *us*, and the right answer is to stay away for a while. A 503 is
+    Goodreads failing to serve anyone, and the right answer is to come back
+    shortly — measured live, one request in three returned 503 while the other
+    two returned a complete 150KB page to the same client. Treating that as a
+    refusal opened the circuit, and then paused every DAG for ninety minutes,
+    over a source that was answering us.
     """
 
     threshold: int
     failures: int = 0
     opened: bool = False
     reason: str | None = None
+    refused: bool = False
 
-    def record_failure(self, reason: str) -> None:
+    def record_failure(self, reason: str, *, refusal: bool) -> None:
         self.failures += 1
         if self.failures >= self.threshold and not self.opened:
             self.opened = True
             self.reason = reason
-            logger.warning("goodreads.circuit_open", reason=reason, failures=self.failures)
+            self.refused = refusal
+            logger.warning(
+                "goodreads.circuit_open", reason=reason, failures=self.failures, refusal=refusal
+            )
 
-    def trip(self, reason: str) -> None:
+    def trip(self, reason: str, *, refusal: bool = True) -> None:
         """Open immediately, for a failure that will not fix itself."""
         self.opened = True
         self.reason = reason
-        logger.warning("goodreads.circuit_open", reason=reason, immediate=True)
+        self.refused = refusal
+        logger.warning("goodreads.circuit_open", reason=reason, immediate=True, refusal=refusal)
 
     def record_success(self) -> None:
         self.failures = 0
@@ -208,15 +226,44 @@ class GoodreadsExtractor:
         # the behaviour that gets an integration blocked.
         self._gate = asyncio.Semaphore(settings.goodreads_max_in_flight)
         self._circuit = _CircuitBreaker(settings.goodreads_circuit_failure_threshold)
+        self._transient_retries = settings.goodreads_transient_retries
         self._cache = GoodreadsResultCache(
             settings.goodreads_title_cache_ttl_seconds,
             settings.goodreads_isbn_cache_ttl_seconds,
         )
 
+    async def _backoff(self, attempt: int) -> None:
+        """Wait before retrying a transient failure.
+
+        Doubling, on top of the two seconds the rate limiter already imposes,
+        so a source under load is not asked again at the same cadence that
+        found it under load.
+        """
+        delay = TRANSIENT_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        if self._sleep is not None:
+            await self._sleep(delay)
+        else:
+            await asyncio.sleep(delay)
+
     @property
     def circuit_open(self) -> bool:
         """Whether the resolver should stop trying Goodreads for this run."""
         return self._circuit.opened
+
+    @property
+    def refused(self) -> bool:
+        """Whether the source made a decision about us, rather than just failing.
+
+        Only this warrants the cross-run cooldown. A run stopped by upstream
+        5xx should end and let the next one try; a run stopped by a block
+        should keep every other DAG away too.
+        """
+        return self._circuit.opened and self._circuit.refused
+
+    @property
+    def circuit_reason(self) -> str | None:
+        """Why the circuit opened, for a report that explains itself."""
+        return self._circuit.reason
 
     def ensure_accepted(self) -> None:
         """Refuse to run unless both gates are set.
@@ -259,33 +306,62 @@ class GoodreadsExtractor:
         if self._circuit.opened:
             raise GoodreadsUnavailableError(f"circuit open: {self._circuit.reason}")
 
-        async with self._gate:
-            await self._bucket.acquire()
-            try:
-                response = await client.get(
-                    path, params=params, headers={"Accept": accept} if accept else None
-                )
-            except httpx.TransportError as error:
-                self._circuit.record_failure(f"transport: {type(error).__name__}")
-                raise GoodreadsUnavailableError(f"transport failure: {error}") from error
+        # Transient failures are retried here rather than counted against the
+        # breaker, because they are not evidence of anything. Goodreads serves
+        # 503 to roughly one request in three at present while answering the
+        # other two in full, and those 503s cluster: a sample of twelve
+        # contained a run of three. Five consecutive is the breaker's
+        # threshold, so an ordinary wobble read as a block, stopped the run,
+        # and — once refusals became durable — kept every DAG away for ninety
+        # minutes over a source that was talking to us.
+        #
+        # Retrying is also what the scraper this pipeline was compared against
+        # did, and the reason it never saw a circuit open. The difference was
+        # never the identity it presented; it was that it came back.
+        attempt = 0
+        while True:
+            last: str | None = None
+            async with self._gate:
+                await self._bucket.acquire()
+                try:
+                    response = await client.get(
+                        path, params=params, headers={"Accept": accept} if accept else None
+                    )
+                except httpx.TransportError as error:
+                    last = f"transport: {type(error).__name__}"
+                    if attempt >= self._transient_retries:
+                        self._circuit.record_failure(last, refusal=False)
+                        raise GoodreadsUnavailableError(f"transport failure: {error}") from error
 
-        if response.status_code in ACCESS_DENIED_STATUS:
-            # A block is an answer, not an error to retry around.
-            self._circuit.trip(f"access denied: HTTP {response.status_code}")
-            raise GoodreadsUnavailableError(
-                f"access denied (HTTP {response.status_code})",
-                status_code=response.status_code,
-            )
-        if response.status_code >= SERVER_ERROR_THRESHOLD:
-            self._circuit.record_failure(f"HTTP {response.status_code}")
-            raise GoodreadsUnavailableError(
-                f"upstream error HTTP {response.status_code}",
-                status_code=response.status_code,
-            )
-        if response.status_code >= CLIENT_ERROR_THRESHOLD:
-            raise GoodreadsUnavailableError(
-                f"HTTP {response.status_code}", status_code=response.status_code
-            )
+            if last is None:
+                if response.status_code in ACCESS_DENIED_STATUS:
+                    # A block is an answer, not an error to retry around.
+                    self._circuit.trip(f"access denied: HTTP {response.status_code}")
+                    raise GoodreadsUnavailableError(
+                        f"access denied (HTTP {response.status_code})",
+                        status_code=response.status_code,
+                    )
+                if response.status_code >= SERVER_ERROR_THRESHOLD:
+                    last = f"HTTP {response.status_code}"
+                    if attempt >= self._transient_retries:
+                        self._circuit.record_failure(last, refusal=False)
+                        raise GoodreadsUnavailableError(
+                            f"upstream error HTTP {response.status_code}",
+                            status_code=response.status_code,
+                        )
+                elif response.status_code >= CLIENT_ERROR_THRESHOLD:
+                    # A 404 is about this page, not about us: never retried,
+                    # never counted, because repeating it would only confirm
+                    # that the book does not exist.
+                    raise GoodreadsUnavailableError(
+                        f"HTTP {response.status_code}", status_code=response.status_code
+                    )
+                else:
+                    break
+
+            attempt += 1
+            logger.info("goodreads.transient_retry", path=path, attempt=attempt, reason=last)
+            await self._backoff(attempt)
 
         body = response.text
         if _looks_like_challenge(body):
@@ -302,7 +378,7 @@ class GoodreadsExtractor:
             #
             # record_failure resets on any success, so scattered empties across
             # a healthy run never accumulate into a false positive.
-            self._circuit.record_failure(f"empty body on HTTP {response.status_code}")
+            self._circuit.record_failure(f"empty body on HTTP {response.status_code}", refusal=True)
             raise GoodreadsUnavailableError(
                 f"empty body on HTTP {response.status_code}",
                 status_code=response.status_code,
@@ -555,7 +631,7 @@ class GoodreadsExtractor:
         try:
             results = json.loads(body)
         except json.JSONDecodeError as error:
-            self._circuit.record_failure("autocomplete was not JSON")
+            self._circuit.record_failure("autocomplete was not JSON", refusal=False)
             raise GoodreadsUnavailableError(
                 f"autocomplete response was not JSON: {error}"
             ) from error

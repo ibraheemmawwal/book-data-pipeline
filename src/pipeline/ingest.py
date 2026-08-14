@@ -263,8 +263,10 @@ def run_ingestion(
         raise
 
     with active.begin() as connection:
-        if goodreads is not None and goodreads.circuit_open:
-            record_refusal(connection, run_id, SourceName.GOODREADS, "circuit opened")
+        if goodreads is not None and goodreads.refused:
+            record_refusal(
+                connection, run_id, SourceName.GOODREADS, goodreads.circuit_reason or "refused"
+            )
         finalise_run(
             connection,
             run_id,
@@ -353,9 +355,11 @@ def run_resolution_to_sink(
             finalise_run(connection, run_id, status="failed")
         raise
 
-    if goodreads is not None and goodreads.circuit_open:
+    if goodreads is not None and goodreads.refused:
         with active.begin() as connection:
-            record_refusal(connection, run_id, SourceName.GOODREADS, "circuit opened")
+            record_refusal(
+                connection, run_id, SourceName.GOODREADS, goodreads.circuit_reason or "refused"
+            )
 
     report.run_id = run_id
     return report
