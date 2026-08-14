@@ -45,8 +45,25 @@ RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 # and cannot succeed. Google's Books API caps a project at 1,000 requests a day
 # and the limit cannot be raised, which makes the difference the whole ballgame.
 _QUOTA_EXHAUSTED_REASONS = frozenset(
-    {"dailylimitexceeded", "dailylimitexceededunreg", "quotaexceeded"}
+    {
+        "dailylimitexceeded",
+        "dailylimitexceededunreg",
+        "quotaexceeded",
+        # Google's newer error envelope carries no legacy reason code at all —
+        # it reports the condition in the error's status field, as
+        # RESOURCE_EXHAUSTED. The original set matched neither that nor the
+        # rateLimitExceeded the Books API still emits, so every 429 fell
+        # through to the retry path and was paid for five times per candidate.
+        "resource_exhausted",
+    }
 )
+
+# Deliberately *not* in the set above: "rateLimitExceeded" and
+# "userRateLimitExceeded" can be momentary rather than a spent day, and
+# short-circuiting on the first one would let a single blip disable the source
+# for a whole run. They are caught instead by surviving every retry, below —
+# the same distinction the Goodreads client draws between a source that is
+# failing and a source that has decided something.
 
 
 HTTP_ERROR_THRESHOLD = 400
@@ -316,6 +333,23 @@ async def request_with_retries(  # noqa: PLR0913
 
         if attempt < max_attempts - 1:
             await wait(_backoff(attempt, base_delay, max_delay))
+
+    if last_status == TOO_MANY_REQUESTS:
+        # Every attempt refused, spread across backoff, and the body never said
+        # plainly that the allowance was spent. Measured: 6,662 candidates each
+        # paid five requests to be told this, ~33,000 requests against a daily
+        # cap of 1,000 and about nineteen hours of wall-clock, because the
+        # generic error raised here left the run's budget intact and the next
+        # candidate simply tried again.
+        #
+        # Five 429s in a row is a spent allowance by any reading worth acting
+        # on, whatever the body called it. Saying so burns the budget once and
+        # every later candidate skips the source with a reason.
+        raise QuotaExhaustedError(
+            source,
+            f"exhausted {max_attempts} attempts ({last_detail}); treating the allowance as spent",
+            status_code=last_status,
+        )
 
     raise SourceUnavailableError(
         source,

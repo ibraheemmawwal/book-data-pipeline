@@ -27,6 +27,11 @@ from pipeline.extract.base import (
 URL = "https://example.test/volumes"
 
 
+async def _no_wait(_seconds: float) -> None:
+    """Collapse the backoff so these run in milliseconds."""
+    return
+
+
 def daily_limit_body() -> dict[str, object]:
     """The shape Google actually returns when the day's allowance is gone."""
     return {
@@ -136,3 +141,90 @@ class TestRetryBehaviour:
     def test_it_remains_a_source_failure(self) -> None:
         # Callers that only know about SourceUnavailableError must keep working.
         assert issubclass(QuotaExhaustedError, SourceUnavailableError)
+
+
+def modern_quota_body() -> dict[str, object]:
+    """Google's newer envelope: no legacy reason code, only a status."""
+    return {
+        "error": {
+            "code": 429,
+            "message": "Quota exceeded for quota metric 'Queries'",
+            "status": "RESOURCE_EXHAUSTED",
+        }
+    }
+
+
+class TestTheEnvelopeGoogleActuallySends:
+    def test_the_modern_status_is_recognised(self) -> None:
+        # The legacy reason set matched neither this nor rateLimitExceeded, so
+        # every 429 fell through to the retry path.
+        assert quota_is_exhausted(httpx.Response(429, json=modern_quota_body()))
+
+    def test_momentary_throttling_still_is_not(self) -> None:
+        # Short-circuiting on the first of these would let one blip disable the
+        # source for a whole run.
+        assert not quota_is_exhausted(httpx.Response(429, json=rate_limit_body()))
+
+    @respx.mock
+    async def test_it_stops_on_the_first_response(self) -> None:
+        route = respx.get(URL).mock(return_value=httpx.Response(429, json=modern_quota_body()))
+
+        with pytest.raises(QuotaExhaustedError):
+            await request_with_retries(
+                httpx.AsyncClient(), "GET", URL, max_attempts=5, sleep=_no_wait
+            )
+
+        assert route.call_count == 1
+
+
+class TestSurvivingEveryRetryIsItselfTheAnswer:
+    """The failure that cost ~33,000 requests against a 1,000/day cap.
+
+    6,662 candidates each paid five requests to be told the allowance was
+    spent, because the body never said so in a form the reason set matched and
+    the generic error left the run's budget intact. Five 429s in a row is a
+    spent allowance by any reading worth acting on.
+    """
+
+    @respx.mock
+    async def test_an_unrecognised_429_becomes_exhaustion(self) -> None:
+        respx.get(URL).mock(return_value=httpx.Response(429, json=rate_limit_body()))
+
+        # Not SourceUnavailableError: the caller has to be able to tell that
+        # asking again this run is pointless, and only this type says so.
+        with pytest.raises(QuotaExhaustedError):
+            await request_with_retries(
+                httpx.AsyncClient(), "GET", URL, max_attempts=5, sleep=_no_wait
+            )
+
+    @respx.mock
+    async def test_the_retries_still_happen_first(self) -> None:
+        # A 429 that clears must still be waited out; the point is what happens
+        # when it does not.
+        route = respx.get(URL).mock(
+            side_effect=[
+                httpx.Response(429, json=rate_limit_body()),
+                httpx.Response(429, json=rate_limit_body()),
+                httpx.Response(200, json={}),
+            ]
+        )
+
+        response = await request_with_retries(
+            httpx.AsyncClient(), "GET", URL, max_attempts=5, sleep=_no_wait
+        )
+
+        assert response.status_code == 200
+        assert route.call_count == 3
+
+    @respx.mock
+    async def test_a_non_429_exhaustion_stays_a_plain_failure(self) -> None:
+        # A run of 503s is the source failing, not an allowance being spent,
+        # and must not retire the budget for the rest of the run.
+        respx.get(URL).mock(return_value=httpx.Response(503))
+
+        with pytest.raises(SourceUnavailableError) as caught:
+            await request_with_retries(
+                httpx.AsyncClient(), "GET", URL, max_attempts=3, sleep=_no_wait
+            )
+
+        assert not isinstance(caught.value, QuotaExhaustedError)

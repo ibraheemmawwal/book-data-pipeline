@@ -627,3 +627,97 @@ class TestASpentDailyAllowance:
 
         assert openlibrary.call_count == 2
         assert result.resolved
+
+
+class TestAnAllowanceSpentWithoutSayingSo:
+    """The case that actually happened, and cost ~33,000 requests.
+
+    Every mechanism above works only once something recognises the 429 as a
+    spent allowance. In production nothing did: Google returned a body whose
+    reason code was not in the set, so each candidate retried five times and
+    raised a generic failure that left the run's budget untouched. 6,662
+    candidates paid five requests each to be told the same thing, against a cap
+    of 1,000 a day.
+
+    The fix does not depend on matching a string: a 429 that survives every
+    retry is treated as a spent allowance whatever the body called it.
+    """
+
+    @staticmethod
+    def _unlabelled() -> httpx.Response:
+        # Momentary-throttling wording, returned indefinitely.
+        return httpx.Response(
+            429,
+            json={"error": {"code": 429, "errors": [{"reason": "rateLimitExceeded"}]}},
+        )
+
+    @respx.mock
+    async def test_one_candidate_pays_for_the_discovery_and_no_more(
+        self, settings: Settings
+    ) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        google = respx.get(GB_VOLUMES).mock(return_value=self._unlabelled())
+        resolver = CatalogueResolver(
+            settings.model_copy(
+                update={"googlebooks_api_key": SecretStr("k"), "http_max_attempts": 2}
+            )
+        )
+
+        for key in ("a", "b", "c", "d", "e", "f"):
+            await resolver.resolve(candidate(candidate_key=key))
+
+        # Two: the retries the first candidate spends discovering it, at the
+        # attempt count these tests use to keep the backoff short. In
+        # production the count is five, so before this change six candidates
+        # cost thirty requests and a 500-candidate run cost 2,500 — against a
+        # daily cap of 1,000.
+        assert google.call_count == 2
+
+    @respx.mock
+    async def test_later_candidates_skip_with_a_reason(self, settings: Settings) -> None:
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        respx.get(GB_VOLUMES).mock(return_value=self._unlabelled())
+        resolver = CatalogueResolver(
+            settings.model_copy(
+                update={"googlebooks_api_key": SecretStr("k"), "http_max_attempts": 2}
+            )
+        )
+
+        await resolver.resolve(candidate(candidate_key="first"))
+        later = await resolver.resolve(candidate(candidate_key="second"))
+
+        attempt = next(a for a in later.attempts if a.source is SourceName.GOOGLEBOOKS)
+        assert attempt.outcome is Outcome.SKIPPED
+
+    @respx.mock
+    async def test_a_429_that_clears_is_still_waited_out(self, settings: Settings) -> None:
+        # The source must not be retired by throttling that genuinely passes,
+        # or the fix trades one failure for a worse one.
+        respx.get(OL_SEARCH).mock(return_value=httpx.Response(200, json={"docs": []}))
+        respx.get(GUTENDEX).mock(
+            return_value=httpx.Response(200, json={"next": None, "results": []})
+        )
+        google = respx.get(GB_VOLUMES).mock(
+            side_effect=[
+                self._unlabelled(),
+                httpx.Response(200, json={"items": []}),
+                httpx.Response(200, json={"items": []}),
+            ]
+        )
+        resolver = CatalogueResolver(
+            settings.model_copy(
+                update={"googlebooks_api_key": SecretStr("k"), "http_max_attempts": 2}
+            )
+        )
+
+        for key in ("a", "b"):
+            await resolver.resolve(candidate(candidate_key=key))
+
+        # Both candidates reached the source: the first after one retry.
+        assert google.call_count == 3
