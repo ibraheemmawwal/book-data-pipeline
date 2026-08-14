@@ -17,7 +17,7 @@ from pipeline.config import Settings
 from pipeline.contested import find_contested, resolve_contested
 from pipeline.extract import googlebooks, openlibrary
 from pipeline.extract.base import Rejected
-from pipeline.extract.goodreads import GoodreadsUnavailableError
+from pipeline.extract.goodreads import GoodreadsNotAcceptedError, GoodreadsUnavailableError
 from pipeline.load import CatalogueLoader
 from pipeline.models.db import book_sources, books, ingestion_runs
 from pipeline.models.domain import CleanBook, RawBook, SourceName
@@ -477,3 +477,34 @@ class TestAdjudicatedBooksAreNotAskedAgain:
         found = find_contested(engine, minimum_conflicts=1, limit=10)
 
         assert [b["isbn13"] for b in found] == [unanswered]
+
+
+class TestAnUnacceptedSourceMidRun:
+    def test_it_closes_the_run_before_re_raising(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The gate is checked up front, so reaching this means configuration
+        # changed under a live run. The run row still has to be closed: a
+        # crashed run and one that never started must stay distinguishable.
+        CatalogueLoader().load(
+            engine,
+            [
+                openlibrary_view("9780000000255", title="Contested", year="1965", pages=100),
+                googlebooks_view("9780000000255", title="Other", year="1999", pages=900),
+            ],
+        )
+
+        async def refuse(*_args: Any, **_kwargs: Any) -> None:
+            raise GoodreadsNotAcceptedError("gate withdrawn mid-run")
+
+        monkeypatch.setattr("pipeline.contested._run", refuse)
+
+        with pytest.raises(GoodreadsNotAcceptedError):
+            resolve_contested(
+                settings_for(str(engine.url)), minimum_conflicts=1, limit=5, engine=engine
+            )
+
+        status = connection.execute(
+            select(ingestion_runs.c.status).order_by(ingestion_runs.c.started_at.desc()).limit(1)
+        ).scalar_one()
+        assert status == "failed"

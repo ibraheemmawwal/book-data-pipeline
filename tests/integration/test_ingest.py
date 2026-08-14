@@ -28,7 +28,7 @@ from pipeline.models.db import (
 from pipeline.models.domain import CandidateBook, SourceName
 from pipeline.models.events import EventType
 from pipeline.observability.runs import abandon_stale_runs, finalise_run, start_run
-from pipeline.source_health import record_refusal
+from pipeline.source_health import last_refusal, record_refusal
 
 pytestmark = pytest.mark.integration
 
@@ -558,3 +558,87 @@ class TestGoodreadsCooldownInIngestion:
 
         reasons = connection.execute(select(source_runs.c.error)).scalars().all()
         assert not any("refused us at" in (reason or "") for reason in reasons)
+
+
+class TestARefusalDuringIngestion:
+    """Ingestion records a refusal so the other DAGs back off too.
+
+    A refusal discovered here is the same fact enrichment would have
+    discovered; writing it down is what stops each DAG rediscovering it
+    separately. Upstream 5xx is deliberately not written.
+    """
+
+    class _Refused:
+        """A Goodreads extractor that has been blocked."""
+
+        refused = True
+        circuit_open = True
+        circuit_reason = "access denied: HTTP 403"
+
+        def __init__(self, _settings: Any) -> None: ...
+
+        def build_client(self) -> Any:  # pragma: no cover - never reached
+            raise AssertionError("a refused extractor must not be used")
+
+    class _Broken(_Refused):
+        """One stopped by upstream 5xx, which is not a refusal."""
+
+        refused = False
+        circuit_reason = "HTTP 503"
+
+    @pytest.fixture
+    def goodreads_on(self, offline: Settings) -> Settings:
+        return offline.model_copy(
+            update={
+                "goodreads_enabled": True,
+                "goodreads_unofficial_source_accepted": True,
+            }
+        )
+
+    def test_a_refusal_is_recorded(
+        self,
+        goodreads_on: Settings,
+        engine: Engine,
+        connection: Connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_manifest(goodreads_on, 1)
+        monkeypatch.setattr(ingest_module, "GoodreadsExtractor", self._Refused)
+
+        run_ingestion(goodreads_on, engine=engine)
+
+        assert last_refusal(connection, SourceName.GOODREADS, within=timedelta(hours=1))
+
+    def test_an_upstream_failure_is_not_recorded(
+        self,
+        goodreads_on: Settings,
+        engine: Engine,
+        connection: Connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        write_manifest(goodreads_on, 1)
+        monkeypatch.setattr(ingest_module, "GoodreadsExtractor", self._Broken)
+
+        run_ingestion(goodreads_on, engine=engine)
+
+        assert last_refusal(connection, SourceName.GOODREADS, within=timedelta(hours=1)) is None
+
+    def test_the_kafka_path_records_it_too(
+        self,
+        goodreads_on: Settings,
+        engine: Engine,
+        connection: Connection,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Phase 2 resolves through the same extractor and must not be the one
+        # path that forgets.
+        write_manifest(goodreads_on, 1)
+        monkeypatch.setattr(ingest_module, "GoodreadsExtractor", self._Refused)
+
+        class Sink:
+            def emit(self, _events: Any) -> None: ...
+            def flush(self) -> None: ...
+
+        run_resolution_to_sink(goodreads_on, Sink(), engine=engine)
+
+        assert last_refusal(connection, SourceName.GOODREADS, within=timedelta(hours=1))

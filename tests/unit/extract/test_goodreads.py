@@ -10,6 +10,7 @@ rather than asserted in a comment.
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from pipeline.config import Settings
 from pipeline.extract.base import Rejected
 from pipeline.extract.goodreads import (
     MAX_DETAIL_ATTEMPTS,
+    TRANSIENT_BACKOFF_SECONDS,
     GoodreadsExtractor,
     GoodreadsNotAcceptedError,
     GoodreadsResultCache,
@@ -1269,3 +1271,18 @@ class TestRealRefusalsStillCount:
 
         assert route.call_count == 4
         assert not retrying.circuit_open
+
+
+class TestBackoffWaitsForReal:
+    async def test_it_sleeps_when_no_clock_is_injected(self, accepted: Settings) -> None:
+        # Every other test injects a no-op sleep, which would leave the real
+        # wait — the thing that makes a retry polite rather than a second
+        # hammer — never executed.
+        extractor = GoodreadsExtractor(
+            accepted.model_copy(update={"goodreads_transient_retries": 1})
+        )
+        started = time.monotonic()
+
+        await extractor._backoff(1)
+
+        assert time.monotonic() - started >= TRANSIENT_BACKOFF_SECONDS

@@ -22,7 +22,7 @@ from pipeline.load import CatalogueLoader
 from pipeline.models.db import books, ingestion_runs, source_runs
 from pipeline.models.domain import CleanBook, RawBook, SourceName
 from pipeline.observability.runs import start_run
-from pipeline.source_health import SourceCoolingDownError, record_refusal
+from pipeline.source_health import SourceCoolingDownError, last_refusal, record_refusal
 from pipeline.transform import canonicalise
 
 pytestmark = pytest.mark.integration
@@ -380,3 +380,44 @@ class TestTheCooldown:
         self._refuse(connection)
 
         assert enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine).queried == 0
+
+
+class TestARefusalIsRecorded:
+    """A refused run has to leave the fact behind for the next one.
+
+    Only a refusal — not a run stopped by upstream 5xx, which is not a decision
+    about us and must not keep the next run away.
+    """
+
+    def test_a_refusal_is_written_for_the_next_run(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        CatalogueLoader().load(engine, [imported("gr-ref-1")])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.circuit_open", property(lambda _: True)
+        )
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.refused", property(lambda _: True)
+        )
+
+        report = enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine)
+
+        assert report.refused
+        assert last_refusal(connection, SourceName.GOODREADS, within=timedelta(hours=1))
+
+    def test_an_upstream_failure_is_not_written(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The 503 case. The run stops, but the next one must be free to try.
+        CatalogueLoader().load(engine, [imported("gr-ref-2")])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.circuit_open", property(lambda _: True)
+        )
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.refused", property(lambda _: False)
+        )
+
+        report = enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine)
+
+        assert not report.refused
+        assert last_refusal(connection, SourceName.GOODREADS, within=timedelta(hours=1)) is None
