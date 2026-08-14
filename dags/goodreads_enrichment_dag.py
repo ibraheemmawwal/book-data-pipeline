@@ -18,9 +18,14 @@ would take six hours and be refused somewhere in the middle.
 
 **It must be pausable on its own.** When Goodreads starts answering 202 with an
 empty body, the right response is to stop asking — without stopping ingestion,
-which does not depend on it. The pause outlives the run that discovered it:
-every Airflow task is a fresh process, so a breaker that tripped at 14:17 would
-otherwise be forgotten by 15:17 and the block rediscovered hourly.
+which does not depend on it.
+
+The block is global, so moving to the next book does not help; and it is short,
+clearing in about five minutes when measured. So a run waits it out in place
+rather than ending over it. Only a block that survives ten minutes of waiting
+ends the run, and that refusal outlives the run that found it: every Airflow
+task is a fresh process, so a breaker that tripped at 14:17 would otherwise be
+forgotten by 15:17 and the block rediscovered hourly.
 """
 
 from __future__ import annotations
@@ -98,10 +103,10 @@ def goodreads_enrichment() -> None:
         """Complete each record from its Goodreads id.
 
         Bounded four ways: the per-run slice, one request every two seconds
-        throughout, the circuit breaker that stops this run once the source
-        refuses us repeatedly, and the cooldown that stops the *next* run from
-        rediscovering the same block an hour later. None is a performance
-        choice — they are the terms on which this source is used at all.
+        throughout, a block waited out in place for up to ten minutes, and — if
+        it outlasts that — a circuit that ends the run and a cooldown that
+        keeps the next one away. None is a performance choice; they are the
+        terms on which this source is used at all.
         """
         from pipeline.config import Settings
         from pipeline.enrich import enrich_goodreads

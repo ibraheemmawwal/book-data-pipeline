@@ -216,6 +216,20 @@ class Settings(BaseSettings):
     # about one request in three while answering the rest in full, and those
     # 503s cluster, so without this an ordinary wobble reads as a block.
     goodreads_transient_retries: Annotated[int, Field(ge=0, le=10)] = 3
+    # Waiting out a block, rather than ending the run over it.
+    #
+    # The block is global — the minute the backlog's records returned 202 and
+    # zero bytes, so did Dune and The Catcher in the Rye — so moving to the
+    # next book cannot help. But it lifts on its own: probing one page a
+    # minute, it cleared between the fourth and fifth. Five minutes is that
+    # measurement with a little margin.
+    #
+    # Two waits, so a block costs at most ten minutes of a run that has an hour
+    # and a backlog that is not going anywhere. Surviving both is the evidence
+    # that this is not the short block we measured, and only then does the run
+    # end and the cooldown apply.
+    goodreads_block_pause_seconds: Annotated[float, Field(ge=0, le=1800)] = 300.0
+    goodreads_block_retries: Annotated[int, Field(ge=0, le=10)] = 2
     # How long every path stays away after Goodreads refuses us.
     #
     # The breaker stops one run; this stops the next one. Airflow gives each
@@ -223,10 +237,18 @@ class Settings(BaseSettings):
     # enrichment rediscovers the same block every hour and the sequence of
     # correct runs behaves like a retry loop.
     #
-    # Ninety minutes because the tightest Goodreads schedule is hourly: a
-    # cooldown shorter than the gap between runs expires before anything
-    # consults it, which is not a cooldown. Zero disables the wait entirely.
-    goodreads_cooldown_minutes: Annotated[int, Field(ge=0)] = 90
+    # Fifteen minutes, not ninety.
+    #
+    # Ninety was picked to outlast a block of unknown length, before anyone had
+    # measured one. Measured, it cleared in about five minutes — so ninety was
+    # eighteen times the evidence, and it showed: a single block cost an hour
+    # and a half of every DAG over something that had already lifted.
+    #
+    # This is now the *second* line of defence. A run waits the block out
+    # itself, twice, and only a block that survives ten minutes of waiting
+    # reaches here — which is genuinely different from the one we measured and
+    # worth a longer pause than the run took. Zero disables the wait entirely.
+    goodreads_cooldown_minutes: Annotated[int, Field(ge=0)] = 15
     goodreads_title_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 3600
     goodreads_isbn_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 86400
     goodreads_min_match_score: Annotated[float, Field(ge=0, le=1)] = 0.4

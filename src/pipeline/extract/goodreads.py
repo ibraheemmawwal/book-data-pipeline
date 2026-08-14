@@ -38,6 +38,7 @@ import json
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import Enum, auto
 from typing import Any
 
 import httpx
@@ -86,6 +87,16 @@ SERVER_ERROR_THRESHOLD = 500
 # First retry waits this long, then it doubles. On top of the rate limiter's
 # own spacing, so three retries span roughly fourteen seconds.
 TRANSIENT_BACKOFF_SECONDS = 1.0
+
+
+class _Verdict(Enum):
+    """What a response means for whether to ask again, and how soon."""
+
+    OK = auto()
+    TRANSIENT = auto()
+    BLOCKED = auto()
+
+
 CLIENT_ERROR_THRESHOLD = 400
 
 
@@ -227,10 +238,19 @@ class GoodreadsExtractor:
         self._gate = asyncio.Semaphore(settings.goodreads_max_in_flight)
         self._circuit = _CircuitBreaker(settings.goodreads_circuit_failure_threshold)
         self._transient_retries = settings.goodreads_transient_retries
+        self._block_retries = settings.goodreads_block_retries
+        self._block_pause = settings.goodreads_block_pause_seconds
         self._cache = GoodreadsResultCache(
             settings.goodreads_title_cache_ttl_seconds,
             settings.goodreads_isbn_cache_ttl_seconds,
         )
+
+    async def _wait(self, seconds: float) -> None:
+        """Sleep, through the injected clock when there is one."""
+        if self._sleep is not None:
+            await self._sleep(seconds)
+        else:
+            await asyncio.sleep(seconds)
 
     async def _backoff(self, attempt: int) -> None:
         """Wait before retrying a transient failure.
@@ -239,11 +259,7 @@ class GoodreadsExtractor:
         so a source under load is not asked again at the same cadence that
         found it under load.
         """
-        delay = TRANSIENT_BACKOFF_SECONDS * (2 ** (attempt - 1))
-        if self._sleep is not None:
-            await self._sleep(delay)
-        else:
-            await asyncio.sleep(delay)
+        await self._wait(TRANSIENT_BACKOFF_SECONDS * (2 ** (attempt - 1)))
 
     @property
     def circuit_open(self) -> bool:
@@ -306,21 +322,21 @@ class GoodreadsExtractor:
         if self._circuit.opened:
             raise GoodreadsUnavailableError(f"circuit open: {self._circuit.reason}")
 
-        # Transient failures are retried here rather than counted against the
-        # breaker, because they are not evidence of anything. Goodreads serves
-        # 503 to roughly one request in three at present while answering the
-        # other two in full, and those 503s cluster: a sample of twelve
-        # contained a run of three. Five consecutive is the breaker's
-        # threshold, so an ordinary wobble read as a block, stopped the run,
-        # and — once refusals became durable — kept every DAG away for ninety
-        # minutes over a source that was talking to us.
+        # Two failure kinds, two budgets, because they are different events.
         #
-        # Retrying is also what the scraper this pipeline was compared against
-        # did, and the reason it never saw a circuit open. The difference was
-        # never the identity it presented; it was that it came back.
-        attempt = 0
+        # A transient failure is Goodreads failing to serve anyone — 503 to
+        # about one request in three at present, in clusters — and a few
+        # seconds of backoff absorbs it.
+        #
+        # A block is Goodreads refusing everyone with 202 and an empty body,
+        # and it is global: the minute these records returned nothing, so did
+        # Dune and The Catcher in the Rye. Moving to the next book cannot help.
+        # But it lifts on its own and quickly — probing one page a minute, it
+        # cleared between the fourth and fifth — so it is waited out inside the
+        # run rather than ending it.
+        transient = 0
+        blocked = 0
         while True:
-            last: str | None = None
             async with self._gate:
                 await self._bucket.acquire()
                 try:
@@ -328,64 +344,74 @@ class GoodreadsExtractor:
                         path, params=params, headers={"Accept": accept} if accept else None
                     )
                 except httpx.TransportError as error:
-                    last = f"transport: {type(error).__name__}"
-                    if attempt >= self._transient_retries:
-                        self._circuit.record_failure(last, refusal=False)
-                        raise GoodreadsUnavailableError(f"transport failure: {error}") from error
-
-            if last is None:
-                if response.status_code in ACCESS_DENIED_STATUS:
-                    # A block is an answer, not an error to retry around.
-                    self._circuit.trip(f"access denied: HTTP {response.status_code}")
-                    raise GoodreadsUnavailableError(
-                        f"access denied (HTTP {response.status_code})",
-                        status_code=response.status_code,
-                    )
-                if response.status_code >= SERVER_ERROR_THRESHOLD:
-                    last = f"HTTP {response.status_code}"
-                    if attempt >= self._transient_retries:
-                        self._circuit.record_failure(last, refusal=False)
-                        raise GoodreadsUnavailableError(
-                            f"upstream error HTTP {response.status_code}",
-                            status_code=response.status_code,
+                    if transient >= self._transient_retries:
+                        self._circuit.record_failure(
+                            f"transport: {type(error).__name__}", refusal=False
                         )
-                elif response.status_code >= CLIENT_ERROR_THRESHOLD:
-                    # A 404 is about this page, not about us: never retried,
-                    # never counted, because repeating it would only confirm
-                    # that the book does not exist.
-                    raise GoodreadsUnavailableError(
-                        f"HTTP {response.status_code}", status_code=response.status_code
-                    )
-                else:
-                    break
+                        raise GoodreadsUnavailableError(f"transport failure: {error}") from error
+                    transient += 1
+                    await self._backoff(transient)
+                    continue
 
-            attempt += 1
-            logger.info("goodreads.transient_retry", path=path, attempt=attempt, reason=last)
-            await self._backoff(attempt)
+            kind, reason = self._classify(response)
+            if kind is _Verdict.OK:
+                self._circuit.record_success()
+                return response.text
 
-        body = response.text
-        if _looks_like_challenge(body):
-            self._circuit.trip("challenge page returned")
-            raise GoodreadsUnavailableError("challenge page returned")
-        if _looks_empty(body):
-            # Counted, not tripped on sight. One empty response proves a page
-            # is unusable; it does not prove the client is blocked, and
-            # inferring "blocked" from a sample of one abandons a run over a
-            # single odd book. Consecutive ones are the evidence — measured
-            # live, a real block returned 202 and zero bytes for eight book
-            # pages out of eight, so a run of three is reached almost at once
-            # when it genuinely is a block.
-            #
-            # record_failure resets on any success, so scattered empties across
-            # a healthy run never accumulate into a false positive.
-            self._circuit.record_failure(f"empty body on HTTP {response.status_code}", refusal=True)
+            if kind is _Verdict.BLOCKED:
+                if blocked >= self._block_retries:
+                    self._circuit.record_failure(reason, refusal=True)
+                    raise GoodreadsUnavailableError(reason, status_code=response.status_code)
+                blocked += 1
+                logger.warning(
+                    "goodreads.blocked_waiting",
+                    path=path,
+                    pause_seconds=self._block_pause,
+                    attempt=blocked,
+                    of=self._block_retries,
+                )
+                await self._wait(self._block_pause)
+                continue
+
+            if transient >= self._transient_retries:
+                self._circuit.record_failure(reason, refusal=False)
+                raise GoodreadsUnavailableError(reason, status_code=response.status_code)
+            transient += 1
+            logger.info("goodreads.transient_retry", path=path, attempt=transient, reason=reason)
+            await self._backoff(transient)
+
+    def _classify(self, response: httpx.Response) -> tuple[_Verdict, str]:
+        """What this response is, or raise if it settles the matter.
+
+        Raising here rather than returning a third kind keeps the caller's loop
+        to the two things it can actually act on: wait a little, or wait a lot.
+
+        Raises:
+            GoodreadsUnavailableError: the response is final — a block we must
+                not retry around, a challenge page, or a 4xx about this page.
+        """
+        if response.status_code in ACCESS_DENIED_STATUS:
+            # An answer, not an error to retry around.
+            self._circuit.trip(f"access denied: HTTP {response.status_code}")
             raise GoodreadsUnavailableError(
-                f"empty body on HTTP {response.status_code}",
+                f"access denied (HTTP {response.status_code})",
                 status_code=response.status_code,
             )
-
-        self._circuit.record_success()
-        return body
+        if response.status_code >= SERVER_ERROR_THRESHOLD:
+            return _Verdict.TRANSIENT, f"HTTP {response.status_code}"
+        if response.status_code >= CLIENT_ERROR_THRESHOLD:
+            # A 404 is about this page, not about us: never retried, never
+            # counted, because repeating it would only confirm that the book
+            # does not exist.
+            raise GoodreadsUnavailableError(
+                f"HTTP {response.status_code}", status_code=response.status_code
+            )
+        if _looks_like_challenge(response.text):
+            self._circuit.trip("challenge page returned")
+            raise GoodreadsUnavailableError("challenge page returned")
+        if _looks_empty(response.text):
+            return _Verdict.BLOCKED, f"empty body on HTTP {response.status_code}"
+        return _Verdict.OK, ""
 
     async def resolve(
         self, client: httpx.AsyncClient, query: str, *, isbn: str | None = None

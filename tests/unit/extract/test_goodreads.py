@@ -1286,3 +1286,99 @@ class TestBackoffWaitsForReal:
         await extractor._backoff(1)
 
         assert time.monotonic() - started >= TRANSIENT_BACKOFF_SECONDS
+
+
+class TestWaitingOutABlock:
+    """A block is global and short, so the run waits rather than ending.
+
+    Measured live: the minute the backlog's records answered 202 with zero
+    bytes, so did Dune and The Catcher in the Rye — moving to the next book
+    cannot help, because the next book is blocked too. And probing one page a
+    minute, it cleared between the fourth and fifth.
+
+    Ending the run over that cost ninety minutes of every DAG for something
+    that had already lifted.
+    """
+
+    @staticmethod
+    def _blocked() -> httpx.Response:
+        return httpx.Response(202, text="")
+
+    @pytest.fixture
+    def waits(self, accepted: Settings) -> tuple[GoodreadsExtractor, list[float]]:
+        slept: list[float] = []
+
+        async def record(seconds: float) -> None:
+            slept.append(seconds)
+
+        extractor = GoodreadsExtractor(
+            accepted.model_copy(
+                update={"goodreads_block_retries": 2, "goodreads_block_pause_seconds": 300.0}
+            ),
+            sleep=record,
+        )
+        return extractor, slept
+
+    @respx.mock
+    async def test_it_retries_the_same_request_after_the_pause(
+        self, waits: tuple[GoodreadsExtractor, list[float]]
+    ) -> None:
+        extractor, _ = waits
+        route = respx.get(AUTOCOMPLETE).mock(
+            side_effect=[self._blocked(), httpx.Response(200, json=[])]
+        )
+
+        async with extractor.build_client() as client:
+            await extractor.autocomplete(client, "dune")
+
+        # The same call again — not the next book, which is equally blocked.
+        assert route.call_count == 2
+        assert not extractor.circuit_open
+
+    @respx.mock
+    async def test_it_waits_the_measured_interval(
+        self, waits: tuple[GoodreadsExtractor, list[float]]
+    ) -> None:
+        extractor, slept = waits
+        respx.get(AUTOCOMPLETE).mock(side_effect=[self._blocked(), httpx.Response(200, json=[])])
+
+        async with extractor.build_client() as client:
+            await extractor.autocomplete(client, "dune")
+
+        # Five minutes, not the one-second transient backoff: a block that
+        # clears in four does not care how eagerly it is asked.
+        assert 300.0 in slept
+
+    @respx.mock
+    async def test_a_block_that_survives_every_pause_is_a_refusal(
+        self, waits: tuple[GoodreadsExtractor, list[float]]
+    ) -> None:
+        extractor, _ = waits
+        route = respx.get(AUTOCOMPLETE).mock(return_value=self._blocked())
+
+        async with extractor.build_client() as client:
+            for _ in range(2):
+                with pytest.raises(GoodreadsUnavailableError):
+                    await extractor.autocomplete(client, "dune")
+
+        # Three requests per call: the first, then one after each of two waits.
+        assert route.call_count == 6
+        assert extractor.circuit_open
+        assert extractor.refused
+
+    @respx.mock
+    async def test_the_waiting_is_bounded(
+        self, waits: tuple[GoodreadsExtractor, list[float]]
+    ) -> None:
+        extractor, slept = waits
+        respx.get(AUTOCOMPLETE).mock(return_value=self._blocked())
+
+        async with extractor.build_client() as client:
+            with pytest.raises(GoodreadsUnavailableError):
+                await extractor.autocomplete(client, "dune")
+
+        # Ten minutes at most, inside a run that has an hour. A backlog that is
+        # not going anywhere does not justify holding the task open longer.
+        # Only the block pauses count — the injected clock also records the
+        # rate limiter's own two-second spacing.
+        assert sum(wait for wait in slept if wait >= 60.0) <= 600.0
