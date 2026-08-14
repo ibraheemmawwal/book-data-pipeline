@@ -182,11 +182,20 @@ class Settings(BaseSettings):
     goodreads_enabled: bool = False
     goodreads_unofficial_source_accepted: bool = False
     goodreads_base_url: str = "https://www.goodreads.com"
-    # At most five request starts per second and one in flight. A lower
-    # observed safe rate wins; these are ceilings, not targets.
+    # One request every two seconds, against a ceiling of five per second.
+    #
+    # The ceiling was always meant to be a ceiling — "a lower observed safe
+    # rate wins" — and we now have the observation. At five per second the book
+    # pages began answering 202 with an empty body after a few hundred
+    # requests, repeatedly, over two days. A scraper collecting the same pages
+    # at one every two seconds never saw a block at all.
+    #
+    # Ten times slower is not a tax, it is the difference between a source that
+    # answers and one that does not: a run at five per second collects nothing
+    # after the first few hundred books.
     goodreads_requests_per_second: Annotated[
         float, Field(gt=0, le=MAX_GOODREADS_REQUESTS_PER_SECOND)
-    ] = MAX_GOODREADS_REQUESTS_PER_SECOND
+    ] = 0.5
     goodreads_max_in_flight: Annotated[int, Field(ge=1, le=1)] = 1
     # Hard timeout: an unofficial contract must never hold a run open.
     goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0

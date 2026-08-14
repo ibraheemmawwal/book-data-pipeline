@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from pipeline.config import Settings, SourceName
+from pipeline.config import MAX_GOODREADS_REQUESTS_PER_SECOND, Settings, SourceName
 
 
 @pytest.fixture(autouse=True)
@@ -272,3 +272,47 @@ class TestThePlaceholderContact:
         position to notice it.
         """
         assert "you@example.com" in self._settings("you@example.com").user_agent()
+
+
+class TestTheGoodreadsRate:
+    """Ten times slower than the ceiling, and why.
+
+    The ceiling was always documented as a ceiling — "a lower observed safe
+    rate wins" — and the observation arrived: at five requests a second the
+    book pages began answering 202 with an empty body after a few hundred
+    requests, repeatedly, over two days. A scraper collecting the same pages
+    one every two seconds never saw a block.
+
+    A run at the ceiling collects nothing after the first few hundred books, so
+    the slower rate is not a tax on throughput. It is the difference between a
+    source that answers and one that does not.
+    """
+
+    @staticmethod
+    def _settings() -> Settings:
+        return Settings(  # type: ignore[call-arg]
+            database_url="postgresql+psycopg://u:p@localhost/db",
+            openlibrary_contact_email="t@example.com",
+        )
+
+    def test_the_default_is_the_observed_safe_rate(self) -> None:
+        assert self._settings().goodreads_requests_per_second == 0.5
+
+    def test_it_stays_below_the_ceiling(self) -> None:
+        settings = self._settings()
+
+        assert settings.goodreads_requests_per_second <= MAX_GOODREADS_REQUESTS_PER_SECOND
+
+    def test_the_ceiling_still_refuses_anything_faster(self) -> None:
+        # The ceiling is what stops a well-meaning override becoming a crawl.
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                database_url="postgresql+psycopg://u:p@localhost/db",
+                openlibrary_contact_email="t@example.com",
+                goodreads_requests_per_second=MAX_GOODREADS_REQUESTS_PER_SECOND + 1,
+            )
+
+    def test_only_one_request_may_be_in_flight(self) -> None:
+        # Pacing and concurrency are separate promises; slowing down must not
+        # quietly permit two at once.
+        assert self._settings().goodreads_max_in_flight == 1
