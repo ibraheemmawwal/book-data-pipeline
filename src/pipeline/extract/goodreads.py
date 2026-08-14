@@ -87,6 +87,11 @@ SERVER_ERROR_THRESHOLD = 500
 # First retry waits this long, then it doubles. On top of the rate limiter's
 # own spacing, so three retries span roughly fourteen seconds.
 TRANSIENT_BACKOFF_SECONDS = 1.0
+# A block's first wait, and the factor it grows by: 10s, then 60s, then 300s
+# (capped by goodreads_block_pause_seconds). Most blocks clear inside the first
+# of those; the rare stubborn one needs the last.
+BLOCK_BACKOFF_SECONDS = 10.0
+BLOCK_BACKOFF_FACTOR = 6.0
 
 
 class _Verdict(Enum):
@@ -245,6 +250,22 @@ class GoodreadsExtractor:
             settings.goodreads_isbn_cache_ttl_seconds,
         )
 
+    def _block_wait(self, attempt: int) -> float:
+        """How long to wait out a block on its ``attempt``-th consecutive hit.
+
+        Escalating, because "blocked" covers two very different events and a
+        single figure serves neither. Measured at five seconds between
+        requests, the first was refused and the next succeeded — most of these
+        clear in seconds. Measured on a bad one, probing a page a minute, it
+        took between four and five minutes.
+
+        A flat five-minute pause paid the worst case every time and turned a
+        blip into a stalled slice. Ten seconds, then a minute, then five gets
+        the common case back almost immediately and still outlasts the rare
+        one, for six minutes of worst-case waiting rather than ten.
+        """
+        return min(self._block_pause, BLOCK_BACKOFF_SECONDS * BLOCK_BACKOFF_FACTOR ** (attempt - 1))
+
     async def _wait(self, seconds: float) -> None:
         """Sleep, through the injected clock when there is one."""
         if self._sleep is not None:
@@ -363,14 +384,15 @@ class GoodreadsExtractor:
                     self._circuit.record_failure(reason, refusal=True)
                     raise GoodreadsUnavailableError(reason, status_code=response.status_code)
                 blocked += 1
+                pause = self._block_wait(blocked)
                 logger.warning(
                     "goodreads.blocked_waiting",
                     path=path,
-                    pause_seconds=self._block_pause,
+                    pause_seconds=pause,
                     attempt=blocked,
                     of=self._block_retries,
                 )
-                await self._wait(self._block_pause)
+                await self._wait(pause)
                 continue
 
             if transient >= self._transient_retries:

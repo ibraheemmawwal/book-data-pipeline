@@ -22,6 +22,7 @@ import respx
 from pipeline.config import Settings
 from pipeline.extract.base import Rejected
 from pipeline.extract.goodreads import (
+    BLOCK_BACKOFF_SECONDS,
     MAX_DETAIL_ATTEMPTS,
     TRANSIENT_BACKOFF_SECONDS,
     GoodreadsExtractor,
@@ -1313,7 +1314,7 @@ class TestWaitingOutABlock:
 
         extractor = GoodreadsExtractor(
             accepted.model_copy(
-                update={"goodreads_block_retries": 2, "goodreads_block_pause_seconds": 300.0}
+                update={"goodreads_block_retries": 3, "goodreads_block_pause_seconds": 300.0}
             ),
             sleep=record,
         )
@@ -1345,9 +1346,11 @@ class TestWaitingOutABlock:
         async with extractor.build_client() as client:
             await extractor.autocomplete(client, "dune")
 
-        # Five minutes, not the one-second transient backoff: a block that
-        # clears in four does not care how eagerly it is asked.
-        assert 300.0 in slept
+        # Ten seconds on the first hit — not five minutes. Measured at five
+        # seconds between requests, one refusal was followed immediately by a
+        # success, so most blocks are back almost at once.
+        assert BLOCK_BACKOFF_SECONDS in slept
+        assert 300.0 not in slept
 
     @respx.mock
     async def test_a_block_that_survives_every_pause_is_a_refusal(
@@ -1361,8 +1364,8 @@ class TestWaitingOutABlock:
                 with pytest.raises(GoodreadsUnavailableError):
                     await extractor.autocomplete(client, "dune")
 
-        # Three requests per call: the first, then one after each of two waits.
-        assert route.call_count == 6
+        # Four requests per call: the first, then one after each of three waits.
+        assert route.call_count == 8
         assert extractor.circuit_open
         assert extractor.refused
 
@@ -1377,8 +1380,9 @@ class TestWaitingOutABlock:
             with pytest.raises(GoodreadsUnavailableError):
                 await extractor.autocomplete(client, "dune")
 
-        # Ten minutes at most, inside a run that has an hour. A backlog that is
-        # not going anywhere does not justify holding the task open longer.
-        # Only the block pauses count — the injected clock also records the
-        # rate limiter's own two-second spacing.
-        assert sum(wait for wait in slept if wait >= 60.0) <= 600.0
+        # About six minutes at most, inside a run that has an hour. Only the
+        # block pauses count — the injected clock also records the rate
+        # limiter's own two-second spacing.
+        blocks = [wait for wait in slept if wait >= BLOCK_BACKOFF_SECONDS]
+        assert blocks == [10.0, 60.0, 300.0]
+        assert sum(blocks) <= 400.0

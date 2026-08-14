@@ -224,12 +224,17 @@ class Settings(BaseSettings):
     # minute, it cleared between the fourth and fifth. Five minutes is that
     # measurement with a little margin.
     #
-    # Two waits, so a block costs at most ten minutes of a run that has an hour
-    # and a backlog that is not going anywhere. Surviving both is the evidence
-    # that this is not the short block we measured, and only then does the run
-    # end and the cooldown apply.
+    # This is the *ceiling* on one wait, not every wait. The waits escalate —
+    # ten seconds, a minute, five minutes — because "blocked" covers two
+    # different events: measured at five seconds between requests, the first
+    # was refused and the next succeeded, while a bad one took between four and
+    # five minutes to lift. A flat five minutes paid the worst case every time.
+    #
+    # Three waits, so a block costs at most about six minutes of a run that has
+    # an hour. Surviving all three is the evidence that this is not the block
+    # we measured, and only then does the run end and the cooldown apply.
     goodreads_block_pause_seconds: Annotated[float, Field(ge=0, le=1800)] = 300.0
-    goodreads_block_retries: Annotated[int, Field(ge=0, le=10)] = 2
+    goodreads_block_retries: Annotated[int, Field(ge=0, le=10)] = 3
     # How long every path stays away after Goodreads refuses us.
     #
     # The breaker stops one run; this stops the next one. Airflow gives each

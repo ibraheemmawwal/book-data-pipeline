@@ -20,10 +20,12 @@ would take six hours and be refused somewhere in the middle.
 empty body, the right response is to stop asking — without stopping ingestion,
 which does not depend on it.
 
-The block is global, so moving to the next book does not help; and it is short,
-clearing in about five minutes when measured. So a run waits it out in place
-rather than ending over it. Only a block that survives ten minutes of waiting
-ends the run, and that refusal outlives the run that found it: every Airflow
+The block is global, so moving to the next book does not help. Its length
+varies: most clear in seconds — measured at five seconds between requests, one
+refusal was followed immediately by a success — while a bad one took between
+four and five minutes. So a run waits it out in place, escalating ten seconds
+to a minute to five, rather than ending over it. Only a block that survives all
+three ends the run, and that refusal outlives the run that found it: every Airflow
 task is a fresh process, so a breaker that tripped at 14:17 would otherwise be
 forgotten by 15:17 and the block rediscovered hourly.
 """
@@ -103,7 +105,7 @@ def goodreads_enrichment() -> None:
         """Complete each record from its Goodreads id.
 
         Bounded four ways: the per-run slice, one request every two seconds
-        throughout, a block waited out in place for up to ten minutes, and — if
+        throughout, a block waited out in place for up to about six minutes, and — if
         it outlasts that — a circuit that ends the run and a cooldown that
         keeps the next one away. None is a performance choice; they are the
         terms on which this source is used at all.
