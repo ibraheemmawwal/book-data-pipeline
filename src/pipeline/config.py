@@ -168,7 +168,18 @@ class Settings(BaseSettings):
     # How many imported Goodreads records one enrichment run completes. Small
     # and hourly: the backlog is finite and not urgent, and a slice that clears
     # ten thousand in two days never looks like a crawl.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 200
+    # Records completed per enrichment run.
+    #
+    # 200 was calibrated when Goodreads was being asked five times a second and
+    # the worry was volume. At one request every two seconds the request rate
+    # is itself the restraint, and the slice only decides how much of the hour
+    # between runs gets used: 200 records is about ten minutes of it, which
+    # leaves a 10,000-record backlog fifty hours away.
+    #
+    # 600 is roughly half the hour at the measured cost of ~3s per record
+    # (one page fetch, plus a second when the first withholds an ISBN or year),
+    # inside the DAG's one-hour execution timeout with room for the tail.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 600
 
     enrich_from_documented_sources: bool = False
 
@@ -200,6 +211,17 @@ class Settings(BaseSettings):
     # Hard timeout: an unofficial contract must never hold a run open.
     goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0
     goodreads_circuit_failure_threshold: Annotated[int, Field(ge=1)] = 5
+    # How long every path stays away after Goodreads refuses us.
+    #
+    # The breaker stops one run; this stops the next one. Airflow gives each
+    # task a fresh process, so without a written-down refusal the hourly
+    # enrichment rediscovers the same block every hour and the sequence of
+    # correct runs behaves like a retry loop.
+    #
+    # Ninety minutes because the tightest Goodreads schedule is hourly: a
+    # cooldown shorter than the gap between runs expires before anything
+    # consults it, which is not a cooldown. Zero disables the wait entirely.
+    goodreads_cooldown_minutes: Annotated[int, Field(ge=0)] = 90
     goodreads_title_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 3600
     goodreads_isbn_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 86400
     goodreads_min_match_score: Annotated[float, Field(ge=0, le=1)] = 0.4

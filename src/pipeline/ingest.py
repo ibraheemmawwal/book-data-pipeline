@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,11 @@ from pipeline.load import CatalogueLoader, record_attempts, record_rejection
 from pipeline.models.domain import CandidateBook, CleanBook, SourceName
 from pipeline.models.events import BookEvent
 from pipeline.observability.runs import finalise_run, record_source_skip, start_run
+from pipeline.source_health import (
+    SourceCoolingDownError,
+    ensure_not_cooling_down,
+    record_refusal,
+)
 from pipeline.transform import canonicalise, unify_identity
 
 logger = structlog.get_logger(__name__)
@@ -177,6 +183,34 @@ def account_for(
     return clean
 
 
+def _goodreads_skip_reason(settings: Settings, engine: Engine) -> str | None:
+    """Why Goodreads sits this run out, or ``None`` to use it.
+
+    Configuration first, then what the source itself said last time.
+
+    A cooldown skips the *source*, not the run. The other three sources have no
+    quarrel with us, and letting one unofficial source decide whether the
+    catalogue grows would hand it a veto it has not earned — ingestion resolves
+    the same candidates through Open Library, Google Books and Gutendex without
+    it. This is the difference from enrichment and contested resolution, where
+    Goodreads is the entire point of the run and there is nothing to continue.
+    """
+    reason = settings.skip_reason(SourceName.GOODREADS)
+    if reason is not None:
+        return reason
+
+    try:
+        with engine.begin() as connection:
+            ensure_not_cooling_down(
+                connection,
+                SourceName.GOODREADS,
+                cooldown=timedelta(minutes=settings.goodreads_cooldown_minutes),
+            )
+    except SourceCoolingDownError as error:
+        return str(error)
+    return None
+
+
 def run_ingestion(
     settings: Settings, *, limit: int | None = None, engine: Engine | None = None
 ) -> IngestReport:
@@ -190,7 +224,7 @@ def run_ingestion(
 
     # Constructed only when both gates allow it, so an unconfigured run never
     # builds a client it must not use.
-    goodreads_skip = settings.skip_reason(SourceName.GOODREADS)
+    goodreads_skip = _goodreads_skip_reason(settings, active)
     goodreads = GoodreadsExtractor(settings) if goodreads_skip is None else None
 
     resolver = CatalogueResolver(settings, goodreads=goodreads)
@@ -229,6 +263,8 @@ def run_ingestion(
         raise
 
     with active.begin() as connection:
+        if goodreads is not None and goodreads.circuit_open:
+            record_refusal(connection, run_id, SourceName.GOODREADS, "circuit opened")
         finalise_run(
             connection,
             run_id,
@@ -261,7 +297,7 @@ def run_resolution_to_sink(
     report = IngestReport()
     active = engine or build_engine(settings.database_url)
 
-    goodreads_skip = settings.skip_reason(SourceName.GOODREADS)
+    goodreads_skip = _goodreads_skip_reason(settings, active)
     goodreads = GoodreadsExtractor(settings) if goodreads_skip is None else None
     resolver = CatalogueResolver(settings, goodreads=goodreads)
 
@@ -316,6 +352,10 @@ def run_resolution_to_sink(
         with active.begin() as connection:
             finalise_run(connection, run_id, status="failed")
         raise
+
+    if goodreads is not None and goodreads.circuit_open:
+        with active.begin() as connection:
+            record_refusal(connection, run_id, SourceName.GOODREADS, "circuit opened")
 
     report.run_id = run_id
     return report

@@ -36,14 +36,28 @@ QUERIES: dict[str, str] = {
     ),
     "goodreads_rows": "SELECT count(*) FROM book_sources WHERE source='goodreads'",
     "runs_open": "SELECT count(*) FROM ingestion_runs WHERE status IN ('running','processing')",
+    "goodreads_pending": (
+        "SELECT count(*) FROM book_sources WHERE source='goodreads' "
+        "AND NOT (raw_payload ? '_edition') AND NOT (raw_payload ? '_detail')"
+    ),
+    # Minutes since Goodreads last refused us, or NULL. "Enrichment is doing
+    # nothing" and "enrichment is deliberately waiting" look identical from the
+    # book counts, and the second one is not a problem — but only if it says so.
+    "goodreads_refused_min_ago": (
+        "SELECT EXTRACT(EPOCH FROM (now() - max(finished_at)))/60 "
+        "FROM source_runs WHERE source='goodreads' AND status='refused'"
+    ),
 }
 
 
 def gather() -> dict[str, Any]:
     with build_engine(Settings().database_url).connect() as connection:
-        scalars = {
-            name: connection.execute(text(sql)).scalar() or 0 for name, sql in QUERIES.items()
-        }
+        scalars: dict[str, Any] = {}
+        for name, sql in QUERIES.items():
+            value = connection.execute(text(sql)).scalar()
+            # "never refused" is genuinely absent, not zero — zero would read as
+            # "refused just now", which is the opposite of the truth.
+            scalars[name] = value if name.endswith("_min_ago") else (value or 0)
         sources = {
             row.source: row.n
             for row in connection.execute(
@@ -83,9 +97,19 @@ def main() -> None:
     gr = max(1, data["goodreads_rows"])
     print(
         f"  goodreads enriched {data['goodreads_enriched']}/{data['goodreads_rows']} "
-        f"({100 * data['goodreads_enriched'] / gr:.0f}%)"
+        f"({100 * data['goodreads_enriched'] / gr:.0f}%)   "
+        f"pending {data['goodreads_pending']}"
     )
     print(f"  runs still open    {data['runs_open']}")
+
+    refused = data["goodreads_refused_min_ago"]
+    if refused is None:
+        print("  goodreads          no refusal on record")
+    else:
+        cooldown = Settings().goodreads_cooldown_minutes
+        remaining = cooldown - refused
+        state = f"cooling down, {remaining:.0f} min left" if remaining > 0 else "clear to resume"
+        print(f"  goodreads          refused {refused:.0f} min ago — {state}")
     print("\n  rows per source:")
     for source, count in data["sources"].items():
         print(f"    {source:<14}{count}")

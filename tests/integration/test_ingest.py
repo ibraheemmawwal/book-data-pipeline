@@ -25,9 +25,10 @@ from pipeline.models.db import (
     resolution_attempts,
     source_runs,
 )
-from pipeline.models.domain import CandidateBook
+from pipeline.models.domain import CandidateBook, SourceName
 from pipeline.models.events import EventType
 from pipeline.observability.runs import abandon_stale_runs, finalise_run, start_run
+from pipeline.source_health import record_refusal
 
 pytestmark = pytest.mark.integration
 
@@ -488,3 +489,72 @@ class TestRunsLeftOpenByAKill:
             select(ingestion_runs.c.status).where(ingestion_runs.c.id == live)
         ).scalar_one()
         assert state == "running"
+
+
+class TestGoodreadsCooldownInIngestion:
+    """A refusal skips the source, not the run.
+
+    This is the asymmetry with enrichment and contested resolution, where
+    Goodreads is the whole point and a cooldown ends the run. Ingestion has
+    three other sources with no quarrel with us, and letting one unofficial
+    source decide whether the catalogue grows would hand it a veto it has not
+    earned.
+    """
+
+    @pytest.fixture
+    def goodreads_on(self, offline: Settings) -> Settings:
+        return offline.model_copy(
+            update={
+                "goodreads_enabled": True,
+                "goodreads_unofficial_source_accepted": True,
+            }
+        )
+
+    @staticmethod
+    def _refuse(connection: Connection) -> None:
+        record_refusal(connection, start_run(connection), SourceName.GOODREADS, "circuit opened")
+        connection.commit()
+
+    def test_the_run_still_produces_books(
+        self, goodreads_on: Settings, engine: Engine, connection: Connection
+    ) -> None:
+        write_manifest(goodreads_on, 3)
+        self._refuse(connection)
+
+        report = run_ingestion(goodreads_on, engine=engine)
+
+        # Resolved by the retained discovery payload, exactly as it would be
+        # with Goodreads switched off.
+        assert report.candidates == 3
+        assert report.status != "failed"
+
+    def test_the_cooldown_is_recorded_as_the_skip_reason(
+        self, goodreads_on: Settings, engine: Engine, connection: Connection
+    ) -> None:
+        # "Why is there no Goodreads data in this run" has to be answerable
+        # from the run record, and "it refused us at 14:17" is the answer.
+        write_manifest(goodreads_on, 1)
+        self._refuse(connection)
+
+        run_ingestion(goodreads_on, engine=engine)
+
+        skipped = (
+            connection.execute(
+                select(source_runs.c.error).where(
+                    source_runs.c.source == "goodreads", source_runs.c.status == "skipped"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert any("refused us at" in reason for reason in skipped)
+
+    def test_without_a_refusal_goodreads_is_not_skipped_for_that_reason(
+        self, goodreads_on: Settings, engine: Engine, connection: Connection
+    ) -> None:
+        write_manifest(goodreads_on, 1)
+
+        run_ingestion(goodreads_on, engine=engine)
+
+        reasons = connection.execute(select(source_runs.c.error)).scalars().all()
+        assert not any("refused us at" in (reason or "") for reason in reasons)

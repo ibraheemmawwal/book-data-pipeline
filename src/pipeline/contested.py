@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -32,8 +33,9 @@ from pipeline.extract.goodreads import (
     GoodreadsUnavailableError,
 )
 from pipeline.load import CatalogueLoader
-from pipeline.models.domain import CandidateBook, CleanBook
+from pipeline.models.domain import CandidateBook, CleanBook, SourceName
 from pipeline.observability.runs import finalise_run, start_run
+from pipeline.source_health import ensure_not_cooling_down, record_refusal
 from pipeline.transform import canonicalise
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +64,7 @@ class ContestedReport:
     unresolved: int = 0
     loaded: int = 0
     run_id: UUID | None = None
+    refused: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -215,6 +218,7 @@ async def _run(
             if extractor.circuit_open:
                 # Once it has refused us, stop for the run. Re-probing a source
                 # that pushed back is exactly what the containment rules forbid.
+                report.refused = True
                 report.errors.append("circuit opened; stopping")
                 break
 
@@ -271,6 +275,9 @@ def resolve_contested(
     Raises:
         GoodreadsNotAcceptedError: either gate is unset. Both are deliberate
             acknowledgements, and a targeted run is not a reason to skip them.
+        SourceCoolingDownError: Goodreads refused a recent run. A targeted run
+            is the most tempting thing to force through a block, and the least
+            defensible: these are books we already hold.
     """
     active = engine or build_engine(settings.database_url)
     report = ContestedReport()
@@ -292,7 +299,14 @@ def resolve_contested(
         logger.info("contested.none_found", minimum_conflicts=minimum_conflicts)
         return report
 
+    # In the transaction that opens the run, and only once there are books to
+    # resolve: a run with nothing to do must not touch the engine at all.
     with active.begin() as connection:
+        ensure_not_cooling_down(
+            connection,
+            SourceName.GOODREADS,
+            cooldown=timedelta(minutes=settings.goodreads_cooldown_minutes),
+        )
         report.run_id = start_run(connection)
 
     try:
@@ -307,6 +321,8 @@ def resolve_contested(
         raise
 
     with active.begin() as connection:
+        if report.refused:
+            record_refusal(connection, report.run_id, SourceName.GOODREADS, "circuit opened")
         finalise_run(
             connection,
             report.run_id,

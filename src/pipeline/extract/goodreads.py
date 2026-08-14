@@ -15,11 +15,16 @@ Containment, all of it load-bearing:
   No browser impersonation, no proxy or fingerprint rotation.
 - **No control bypass.** 401, 403 and challenge pages are treated as terminal
   for the circuit interval, never retried or worked around.
-- **One request in flight**, at most five starts per second, hard five-second
+- **One request in flight**, one start every two seconds, hard five-second
   timeouts.
 - **A circuit breaker** that stops the run's remaining candidates after
   repeated access or contract failures, so one upstream outage cannot become
   thousands of failing calls.
+- **A cooldown that outlives the run.** The breaker is per-process and every
+  scheduled task is a fresh process, so a refusal is written to ``source_runs``
+  and every Goodreads path checks it before opening a client. Without it a run
+  refused at 14:17 is rediscovered hourly, and a sequence of individually
+  correct runs behaves like a retry loop. See ``pipeline.source_health``.
 - **Cache only validated, non-empty results.** Caching an empty answer would
   turn a transient blip into a run-long hole in the catalogue.
 

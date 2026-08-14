@@ -145,6 +145,7 @@ def contested_resolution() -> None:
         from pipeline.config import Settings
         from pipeline.contested import resolve_contested
         from pipeline.extract.goodreads import GoodreadsNotAcceptedError
+        from pipeline.source_health import SourceCoolingDownError
 
         if not found["count"]:
             return {"skipped": "no contested books", "queried": 0}
@@ -160,7 +161,7 @@ def contested_resolution() -> None:
                 limit=found["limit"],
                 skip_adjudicated=not found["readjudicate"],
             )
-        except GoodreadsNotAcceptedError as error:
+        except (GoodreadsNotAcceptedError, SourceCoolingDownError) as error:
             # Not a failure. The tie-breaker is optional, and without it the
             # catalogue is exactly what the documented sources described.
             return {"skipped": str(error)[:140], "queried": 0}

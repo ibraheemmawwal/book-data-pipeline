@@ -5,8 +5,8 @@ expensive to omit: a serverless database suspends its compute when idle and
 terminates the connections it was holding.
 
 That is not a rare edge. The resolve stage spends minutes in external calls —
-Goodreads is limited to one request per second and Google Books answers 429
-until five retries are spent — so the database connection genuinely sits unused
+Goodreads is limited to one request every two seconds and Google Books
+answers 429 until five retries are spent — so the database connection genuinely sits unused
 for long stretches while a run is very much alive. The pool hands the dead
 connection back on the next write, and the run dies with
 ``AdminShutdown: terminating connection due to administrator command``, some

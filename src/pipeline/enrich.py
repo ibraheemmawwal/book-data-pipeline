@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,7 @@ from pipeline.extract.goodreads import GoodreadsExtractor
 from pipeline.load import CatalogueLoader
 from pipeline.models.domain import CleanBook, SourceName
 from pipeline.observability.runs import finalise_run, start_run
+from pipeline.source_health import ensure_not_cooling_down, record_refusal
 from pipeline.transform import canonicalise
 
 logger = structlog.get_logger(__name__)
@@ -61,6 +63,7 @@ class EnrichReport:
     failed: int = 0
     loaded: int = 0
     run_id: UUID | None = None
+    refused: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -93,12 +96,11 @@ def count_unenriched(engine: Engine) -> int:
 
 
 async def _enrich_all(
-    settings: Settings,
+    extractor: GoodreadsExtractor,
     engine: Engine,
     records: list[dict[str, Any]],
     report: EnrichReport,
 ) -> None:
-    extractor = GoodreadsExtractor(settings)
     loader = CatalogueLoader()
     client = extractor.build_client()
 
@@ -107,6 +109,7 @@ async def _enrich_all(
             if extractor.circuit_open:
                 # Once it has refused us repeatedly, stop for the run. The
                 # backlog is not going anywhere and the block is rate-based.
+                report.refused = True
                 report.errors.append("circuit opened; stopping")
                 break
 
@@ -149,13 +152,15 @@ def enrich_goodreads(
 
     Raises:
         GoodreadsNotAcceptedError: either gate is unset.
+        SourceCoolingDownError: Goodreads refused a recent run.
     """
     active = engine or build_engine(settings.database_url)
     report = EnrichReport()
 
     # Before anything observable, so a refused run leaves no run row behind
     # suggesting work was attempted.
-    GoodreadsExtractor(settings).ensure_accepted()
+    extractor = GoodreadsExtractor(settings)
+    extractor.ensure_accepted()
 
     report.pending = count_unenriched(active)
     records = find_unenriched(active, limit=limit)
@@ -163,17 +168,30 @@ def enrich_goodreads(
         logger.info("enrich.nothing_pending")
         return report
 
+    # In the transaction that opens the run, and only once there is work to do.
+    # Checking earlier would cost a query on every empty run; checking later
+    # would leave a run row for work that never happened, and raising here
+    # rolls the whole thing back.
     with active.begin() as connection:
+        ensure_not_cooling_down(
+            connection,
+            SourceName.GOODREADS,
+            cooldown=timedelta(minutes=settings.goodreads_cooldown_minutes),
+        )
         report.run_id = start_run(connection)
 
     try:
-        asyncio.run(_enrich_all(settings, active, records, report))
+        asyncio.run(_enrich_all(extractor, active, records, report))
     except Exception:
         with active.begin() as connection:
             finalise_run(connection, report.run_id, status="failed")
         raise
 
     with active.begin() as connection:
+        if report.refused:
+            # Written before the run is closed, so a crash between the two
+            # cannot lose the one fact the next run needs.
+            record_refusal(connection, report.run_id, SourceName.GOODREADS, "circuit opened")
         finalise_run(
             connection,
             report.run_id,

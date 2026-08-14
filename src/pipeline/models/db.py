@@ -55,7 +55,10 @@ RESOLUTION_OUTCOMES = (
     "unavailable",
     "skipped",
 )
-SOURCE_RUN_STATUSES = ("running", "success", "skipped", "failed")
+# "skipped" is our decision not to ask; "refused" is the source's decision not
+# to answer. Keeping them apart is what lets the next run tell a disabled
+# source from a blocked one — see pipeline.source_health.
+SOURCE_RUN_STATUSES = ("running", "success", "skipped", "refused", "failed")
 REJECTION_STAGES = ("extract", "transform", "load")
 MARKER_TOPICS = ("books.raw", "books.clean")
 

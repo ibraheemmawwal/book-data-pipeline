@@ -8,18 +8,21 @@ matters most, which is that completing a record must not create a second one.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, Engine, select
+from sqlalchemy import Connection, Engine, func, select
 
 from pipeline.config import Settings
 from pipeline.enrich import count_unenriched, enrich_goodreads, find_unenriched
 from pipeline.extract.base import Rejected
 from pipeline.extract.goodreads import GoodreadsNotAcceptedError
 from pipeline.load import CatalogueLoader
-from pipeline.models.db import books
+from pipeline.models.db import books, ingestion_runs, source_runs
 from pipeline.models.domain import CleanBook, RawBook, SourceName
+from pipeline.observability.runs import start_run
+from pipeline.source_health import SourceCoolingDownError, record_refusal
 from pipeline.transform import canonicalise
 
 pytestmark = pytest.mark.integration
@@ -297,3 +300,83 @@ class TestWhenTheSourceStopsAnswering:
         assert report.failed == 1
         assert report.errors
         assert "gr-41" in report.errors[0]
+
+
+class TestTheCooldown:
+    """A refusal recorded by one run must stop the next one.
+
+    Every scheduled task is a fresh process, so the in-process breaker cannot
+    do this on its own: enrichment runs hourly, and without a written-down
+    refusal each run rediscovers the same block and stops in the same place.
+    """
+
+    @staticmethod
+    def _refuse(connection: Connection) -> None:
+        record_refusal(connection, start_run(connection), SourceName.GOODREADS, "circuit opened")
+        connection.commit()
+
+    def test_a_recent_refusal_stops_the_run(self, engine: Engine, connection: Connection) -> None:
+        CatalogueLoader().load(engine, [imported("gr-cool-1")])
+        self._refuse(connection)
+
+        with pytest.raises(SourceCoolingDownError):
+            enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine)
+
+    def test_it_opens_no_run_row(self, engine: Engine, connection: Connection) -> None:
+        # The check shares the transaction that opens the run, so a cooling-down
+        # attempt must leave no evidence that work was tried.
+        CatalogueLoader().load(engine, [imported("gr-cool-2")])
+        self._refuse(connection)
+        before = connection.execute(select(func.count()).select_from(ingestion_runs)).scalar_one()
+
+        with pytest.raises(SourceCoolingDownError):
+            enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine)
+
+        after = connection.execute(select(func.count()).select_from(ingestion_runs)).scalar_one()
+        assert after == before
+
+    def test_an_expired_refusal_does_not(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        CatalogueLoader().load(engine, [imported("gr-cool-3")])
+        self._refuse(connection)
+        connection.execute(
+            source_runs.update().values(finished_at=datetime.now(UTC) - timedelta(days=1))
+        )
+        connection.commit()
+
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id", _answers(None)
+        )
+        report = enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine)
+
+        assert report.queried == 1
+
+    def test_zero_minutes_disables_it(
+        self, engine: Engine, connection: Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The escape hatch has to work, or a stale refusal needs a code change.
+        CatalogueLoader().load(engine, [imported("gr-cool-4")])
+        self._refuse(connection)
+
+        settings = Settings(  # type: ignore[call-arg]
+            database_url=str(engine.url),
+            openlibrary_contact_email="t@example.com",
+            goodreads_enabled=True,
+            goodreads_unofficial_source_accepted=True,
+            goodreads_cooldown_minutes=0,
+        )
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id", _answers(None)
+        )
+
+        assert enrich_goodreads(settings, limit=5, engine=engine).queried == 1
+
+    def test_nothing_pending_never_consults_it(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # No work means no run, and no run means the cooldown is irrelevant —
+        # an empty backlog should not raise just because Goodreads is sulking.
+        self._refuse(connection)
+
+        assert enrich_goodreads(settings_for(str(engine.url)), limit=5, engine=engine).queried == 0

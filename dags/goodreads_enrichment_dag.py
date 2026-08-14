@@ -18,7 +18,9 @@ would take six hours and be refused somewhere in the middle.
 
 **It must be pausable on its own.** When Goodreads starts answering 202 with an
 empty body, the right response is to stop asking — without stopping ingestion,
-which does not depend on it.
+which does not depend on it. The pause outlives the run that discovered it:
+every Airflow task is a fresh process, so a breaker that tripped at 14:17 would
+otherwise be forgotten by 15:17 and the block rediscovered hourly.
 """
 
 from __future__ import annotations
@@ -43,9 +45,10 @@ DEFAULT_ARGS: dict[str, Any] = {
 
 @dag(
     dag_id=DAG_ID,
-    # Hourly, and bounded. The backlog is finite: at 200 records an hour, ten
-    # thousand clear in about two days without a single burst that looks like
-    # a crawl. Raising the slice is a decision, not a default.
+    # Hourly, and bounded. The backlog is finite: at 600 records an hour, ten
+    # thousand clear in under a day, using about half of each hour at one
+    # request every two seconds. The pacing is what keeps this from looking
+    # like a crawl; the slice only decides how much of the hour is used.
     schedule="17 * * * *",
     start_date=pendulum.datetime(2026, 8, 1, tz="UTC"),
     catchup=False,
@@ -94,14 +97,16 @@ def goodreads_enrichment() -> None:
     def fetch_detail(found: dict[str, Any], **context: Any) -> dict[str, Any]:
         """Complete each record from its Goodreads id.
 
-        Bounded three ways: the per-run slice, the circuit breaker that stops
-        the run once the source refuses us repeatedly, and one request per
-        second throughout. None of those is a performance choice — they are the
-        terms on which this source is used at all.
+        Bounded four ways: the per-run slice, one request every two seconds
+        throughout, the circuit breaker that stops this run once the source
+        refuses us repeatedly, and the cooldown that stops the *next* run from
+        rediscovering the same block an hour later. None is a performance
+        choice — they are the terms on which this source is used at all.
         """
         from pipeline.config import Settings
         from pipeline.enrich import enrich_goodreads
         from pipeline.extract.goodreads import GoodreadsNotAcceptedError
+        from pipeline.source_health import SourceCoolingDownError
 
         if not found["pending"]:
             return {"skipped": "nothing pending", "queried": 0}
@@ -111,9 +116,11 @@ def goodreads_enrichment() -> None:
 
         try:
             report = enrich_goodreads(settings, limit=limit)
-        except GoodreadsNotAcceptedError as error:
-            # Not a failure. Without the gates the catalogue is exactly what
-            # the documented sources described.
+        except (GoodreadsNotAcceptedError, SourceCoolingDownError) as error:
+            # Neither is a failure. Without the gates the catalogue is exactly
+            # what the documented sources described; and a run that declines to
+            # ask a source that just refused us has done the right thing, so
+            # marking it red would train everyone to ignore red.
             return {"skipped": str(error)[:140], "queried": 0}
 
         return {
