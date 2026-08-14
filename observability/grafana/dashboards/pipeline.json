@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -846,7 +846,7 @@
       "id": 217,
       "gridPos": {
         "h": 6,
-        "w": 9,
+        "w": 13,
         "x": 0,
         "y": 27
       },
@@ -859,7 +859,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT source, count(*) AS records, count(DISTINCT book_id) AS books, max(last_seen_at) AS last_seen FROM book_sources GROUP BY source ORDER BY records DESC",
+          "rawSql": "SELECT source, count(*) AS records, count(DISTINCT book_id) AS books, count(*) FILTER (WHERE raw_payload ? '_export') AS imported, max(last_seen_at) AS last_seen FROM book_sources GROUP BY source ORDER BY records DESC",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -882,12 +882,12 @@
     },
     {
       "type": "stat",
-      "title": "Goodreads enriched",
-      "description": "Share of Goodreads records carrying the work-editions page \u2014 the only place a publication year appears. Was 0% until the Accept header was fixed.",
+      "title": "Goodreads enriched (fetched records)",
+      "description": "Share of Goodreads records that were fetched from the site and carry the work-editions page, which is the only place a publication year appears. Records imported from an export file are excluded: they were never fetched, so counting them would divide by a population that cannot be enriched \u2014 which is what turned 25% into 1% overnight when 10,000 arrived at once.",
       "id": 218,
       "gridPos": {
         "h": 6,
-        "w": 5,
+        "w": 4,
         "x": 9,
         "y": 27
       },
@@ -900,7 +900,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE raw_payload ? '_edition') / greatest(count(*),1), 1) AS value FROM book_sources WHERE source='goodreads'",
+          "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE raw_payload ? '_edition') / greatest(count(*), 1), 1) AS value FROM book_sources WHERE source='goodreads' AND NOT (raw_payload ? '_export')",
           "datasource": {
             "type": "postgres",
             "uid": "catalogue"
@@ -952,7 +952,7 @@
       "gridPos": {
         "h": 6,
         "w": 5,
-        "x": 14,
+        "x": 13,
         "y": 27
       },
       "datasource": {
@@ -1740,6 +1740,62 @@
       "options": {
         "showHeader": true,
         "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 238,
+      "title": "Imported, awaiting a fetch",
+      "description": "Goodreads records that came from an export file. They carry a title, authors, a rating and a cover, and no year or ISBN \u2014 those need the book's own page. This is the backlog for enrichment, not a fault.",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 18,
+        "y": 27
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "catalogue"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "catalogue"
+          },
+          "rawSql": "SELECT count(*) AS value FROM book_sources WHERE source='goodreads' AND raw_payload ? '_export' AND NOT (raw_payload ? '_edition')"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
       }
     }
   ]
