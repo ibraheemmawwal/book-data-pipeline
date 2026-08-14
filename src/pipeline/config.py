@@ -176,10 +176,17 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 600 is roughly half the hour at the measured cost of ~3s per record
-    # (one page fetch, plus a second when the first withholds an ISBN or year),
-    # inside the DAG's one-hour execution timeout with room for the tail.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 600
+    # 400, sized so a run finishes well inside its hour.
+    #
+    # 600 was half the hour on paper. Measured, two runs took 35 and 41 minutes
+    # — the arithmetic ignored the block waits, which are the whole reason
+    # those exist. On an hourly schedule with one run at a time that leaves no
+    # margin, so a scheduled interval is usually queued behind the active run
+    # and any failure hands it the slot immediately.
+    #
+    # 400 is about 20 minutes of requests plus up to six of waiting out a
+    # block: comfortably inside the hour, so intervals stop stacking.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 400
 
     enrich_from_documented_sources: bool = False
 

@@ -52,16 +52,30 @@ DEFAULT_ARGS: dict[str, Any] = {
 
 @dag(
     dag_id=DAG_ID,
-    # Hourly, and bounded. The backlog is finite: at 600 records an hour, ten
-    # thousand clear in under a day, using about half of each hour at one
-    # request every two seconds. The pacing is what keeps this from looking
-    # like a crawl; the slice only decides how much of the hour is used.
+    # Hourly, and bounded. At 400 records an hour a ten-thousand-record backlog
+    # clears in about a day, using roughly a third of each hour at one request
+    # every two seconds. The pacing is what keeps this from looking like a
+    # crawl; the slice decides how much of the hour is used, and leaving most
+    # of it spare is what stops intervals stacking up behind a slow run.
     schedule="17 * * * *",
     start_date=pendulum.datetime(2026, 8, 1, tz="UTC"),
     catchup=False,
     # Two runs would fetch the same head of the queue twice and spend two runs'
     # worth of politeness on one slice.
     max_active_runs=1,
+    # Stop after three consecutive failures instead of grinding on.
+    #
+    # With one run at a time and a slice that takes most of its hour, a
+    # scheduled interval is usually waiting behind the active run — so failing
+    # a run hands the slot straight to the next one, which looks exactly like
+    # the DAG re-triggering itself. It is draining a backlog, not creating one,
+    # but the effect is the same: a broken run repeats until someone pauses the
+    # DAG by hand, and the only signal is a column of red.
+    #
+    # Three, not one: a single failure is usually the source having a bad
+    # minute, which the next run genuinely does recover from. Three in a row is
+    # something that needs a person.
+    max_consecutive_failed_dag_runs=3,
     default_args=DEFAULT_ARGS,
     tags=["catalogue", "quality"],
     doc_md=__doc__,
