@@ -275,17 +275,21 @@ class TestThePlaceholderContact:
 
 
 class TestTheGoodreadsRate:
-    """Ten times slower than the ceiling, and why.
+    """One request every thirty seconds, and why that number.
 
     The ceiling was always documented as a ceiling — "a lower observed safe
-    rate wins" — and the observation arrived: at five requests a second the
-    book pages began answering 202 with an empty body after a few hundred
-    requests, repeatedly, over two days. A scraper collecting the same pages
-    one every two seconds never saw a block.
+    rate wins" — and the observation arrived by walking the spacing out and
+    counting what came back:
 
-    A run at the ceiling collects nothing after the first few hundred books, so
-    the slower rate is not a tax on throughput. It is the difference between a
-    source that answers and one that does not.
+        2s  ->  8 of 12, then blocked
+        5s  ->  8 of 12, then blocked
+       15s  ->  7 of 18: eight straight successes, then blocked and stayed
+       30s  -> 13 of 13, never blocked
+
+    Eight requests regardless of how they were spread out, which is a rolling
+    budget rather than a rate — until thirty seconds, where it stops running
+    out. Slower per request and faster overall: at two seconds a run spent five
+    minutes blocked for every eight books it fetched.
     """
 
     @staticmethod
@@ -296,7 +300,7 @@ class TestTheGoodreadsRate:
         )
 
     def test_the_default_is_the_observed_safe_rate(self) -> None:
-        assert self._settings().goodreads_requests_per_second == 0.5
+        assert self._settings().goodreads_requests_per_second == pytest.approx(1.0 / 30.0)
 
     def test_it_stays_below_the_ceiling(self) -> None:
         settings = self._settings()

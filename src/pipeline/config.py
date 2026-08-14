@@ -176,17 +176,19 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 400, sized so a run finishes well inside its hour.
+    # 25, paired with a run every half hour.
     #
-    # 600 was half the hour on paper. Measured, two runs took 35 and 41 minutes
-    # — the arithmetic ignored the block waits, which are the whole reason
-    # those exist. On an hourly schedule with one run at a time that leaves no
-    # margin, so a scheduled interval is usually queued behind the active run
-    # and any failure hands it the slot immediately.
+    # A record costs 1.36 requests, measured over 1,089 enriched: 700 needed
+    # only the book page, 389 also needed the editions page because the first
+    # withheld an ISBN or a year. At thirty seconds a request that is about 41
+    # seconds a record, so 25 is roughly 17 minutes of a 30-minute interval.
     #
-    # 400 is about 20 minutes of requests plus up to six of waiting out a
-    # block: comfortably inside the hour, so intervals stop stacking.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 400
+    # The pairing is the point. The slice cannot grow past what the interval
+    # holds — a run that overruns becomes a queued interval, and a task that
+    # times out counts towards the three failures that pause the DAG — so more
+    # throughput has to come from more intervals rather than longer runs. 25
+    # every half hour is 50 an hour where 35 hourly was 35, and both fit.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 25
 
     enrich_from_documented_sources: bool = False
 
@@ -200,20 +202,26 @@ class Settings(BaseSettings):
     goodreads_enabled: bool = False
     goodreads_unofficial_source_accepted: bool = False
     goodreads_base_url: str = "https://www.goodreads.com"
-    # One request every two seconds, against a ceiling of five per second.
+    # One request every thirty seconds.
     #
-    # The ceiling was always meant to be a ceiling — "a lower observed safe
-    # rate wins" — and we now have the observation. At five per second the book
-    # pages began answering 202 with an empty body after a few hundred
-    # requests, repeatedly, over two days. A scraper collecting the same pages
-    # at one every two seconds never saw a block at all.
+    # Measured, by walking the spacing out and counting what came back:
     #
-    # Ten times slower is not a tax, it is the difference between a source that
-    # answers and one that does not: a run at five per second collects nothing
-    # after the first few hundred books.
+    #     2s  ->  8 of 12, then blocked
+    #     5s  ->  8 of 12, then blocked
+    #    15s  ->  7 of 18: eight straight successes, then blocked and stayed
+    #    30s  -> 13 of 13, never blocked
+    #
+    # The shape is a rolling budget of roughly eight requests, not a rate. Under
+    # about thirty seconds apart the budget runs out and everything answers 202
+    # with an empty body for the next five minutes; at thirty it never runs out.
+    #
+    # So this is slower per request and faster overall, which is the part worth
+    # remembering. At two seconds a run spent five minutes blocked for every
+    # eight books it fetched, and managed about 37 books an hour. At thirty
+    # seconds nothing is ever lost to a block.
     goodreads_requests_per_second: Annotated[
         float, Field(gt=0, le=MAX_GOODREADS_REQUESTS_PER_SECOND)
-    ] = 0.5
+    ] = 1.0 / 30.0
     goodreads_max_in_flight: Annotated[int, Field(ge=1, le=1)] = 1
     # Hard timeout: an unofficial contract must never hold a run open.
     goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0

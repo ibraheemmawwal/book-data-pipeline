@@ -42,22 +42,32 @@ DAG_ID = "goodreads_enrichment"
 
 DEFAULT_ARGS: dict[str, Any] = {
     "owner": "catalogue",
-    "retries": 2,
+    # One retry, not two. A retry is for the run that died of something other
+    # than the source — a dropped connection, a restarted worker — and the
+    # source's own refusals are handled inside the run and remembered across
+    # runs, so a second retry buys nothing and costs an interval: 17 minutes of
+    # work plus a 10-minute wait plus 17 more already overruns the half hour.
+    "retries": 1,
     "retry_delay": timedelta(minutes=10),
-    "retry_exponential_backoff": True,
-    "max_retry_delay": timedelta(hours=1),
-    "execution_timeout": timedelta(hours=1),
+    # Shorter than the interval it runs in, so a stuck run is killed before the
+    # next one is due rather than holding the slot and queueing it.
+    "execution_timeout": timedelta(minutes=25),
 }
 
 
 @dag(
     dag_id=DAG_ID,
-    # Hourly, and bounded. At 400 records an hour a ten-thousand-record backlog
-    # clears in about a day, using roughly a third of each hour at one request
-    # every two seconds. The pacing is what keeps this from looking like a
-    # crawl; the slice decides how much of the hour is used, and leaving most
-    # of it spare is what stops intervals stacking up behind a slow run.
-    schedule="17 * * * *",
+    # Every half hour, and bounded by what the source will bear rather than by
+    # how fast we could go. At one request every thirty seconds — the spacing
+    # at which the block stops triggering at all — 25 records is about 17
+    # minutes, so each run finishes with a third of its interval spare.
+    #
+    # Twice as often rather than twice as long, deliberately. Spare time in the
+    # interval is what stops a slow run turning into a queued one, and queued
+    # intervals are what made failing a run look like the DAG re-triggering
+    # itself. Throughput comes from the number of intervals; the slice only
+    # decides how much of one gets used.
+    schedule="17,47 * * * *",
     start_date=pendulum.datetime(2026, 8, 1, tz="UTC"),
     catchup=False,
     # Two runs would fetch the same head of the queue twice and spend two runs'

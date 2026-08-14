@@ -1314,7 +1314,16 @@ class TestWaitingOutABlock:
 
         extractor = GoodreadsExtractor(
             accepted.model_copy(
-                update={"goodreads_block_retries": 3, "goodreads_block_pause_seconds": 300.0}
+                update={
+                    "goodreads_block_retries": 3,
+                    "goodreads_block_pause_seconds": 300.0,
+                    # The injected clock records every wait, the rate
+                    # limiter's included. Pacing is not what these tests are
+                    # about, and the real spacing is now thirty seconds — the
+                    # same order as a block pause, so no threshold tells them
+                    # apart. Run the limiter fast enough that it does.
+                    "goodreads_requests_per_second": 1000.0,
+                }
             ),
             sleep=record,
         )
@@ -1380,9 +1389,9 @@ class TestWaitingOutABlock:
             with pytest.raises(GoodreadsUnavailableError):
                 await extractor.autocomplete(client, "dune")
 
-        # About six minutes at most, inside a run that has an hour. Only the
-        # block pauses count — the injected clock also records the rate
-        # limiter's own two-second spacing.
-        blocks = [wait for wait in slept if wait >= BLOCK_BACKOFF_SECONDS]
+        # About six minutes at most, inside a run that has half an hour. The
+        # fixture runs the rate limiter fast enough that its own waits are
+        # sub-millisecond, so anything of a second or more is a block pause.
+        blocks = [wait for wait in slept if wait >= 1.0]
         assert blocks == [10.0, 60.0, 300.0]
         assert sum(blocks) <= 400.0
