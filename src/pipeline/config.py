@@ -191,6 +191,26 @@ class Settings(BaseSettings):
     # 200 an hour clears the remaining 9,406 in about two days.
     enrich_max_per_run: Annotated[int, Field(ge=0)] = 200
 
+    # A wall-clock budget for one run, checked between records.
+    #
+    # The slice is a guess at how much fits in the interval, and it stops
+    # holding the moment the source misbehaves: a run of 500 was timed at 8.2
+    # seconds a record and then met two blocks, which cost five minutes each
+    # and turned it into a 50-minute run that Airflow killed at record 206.
+    #
+    # 40 minutes, against a 50-minute execution_timeout. The gap is one block
+    # ladder plus change, because the budget is only checked between records
+    # and the record in progress may be sitting inside one.
+    #
+    # A run that spends its budget stops and reports what it did. The records
+    # are already loaded, the backlog is unchanged by stopping, and the next
+    # run continues from the same queue — so the honest outcome is a short
+    # success, not a failure. This is what makes an oversized ``limit`` safe to
+    # pass by hand: it now bounds the work, not the run.
+    # Zero disables the budget rather than meaning "no time at all", which is
+    # the reading that makes an unset value safe.
+    enrich_max_run_seconds: Annotated[float, Field(ge=0)] = 40 * 60
+
     enrich_from_documented_sources: bool = False
 
     googlebooks_max_fallback_queries_per_run: Annotated[int, Field(ge=0)] = 500

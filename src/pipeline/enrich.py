@@ -18,6 +18,7 @@ exactly where that deserves a deliberate acknowledgement rather than a default.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -64,6 +65,7 @@ class EnrichReport:
     loaded: int = 0
     run_id: UUID | None = None
     refused: bool = False
+    stopped_early: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -80,6 +82,17 @@ def find_unenriched(engine: Engine, *, limit: int) -> list[dict[str, Any]]:
         {"book_id": row.book_id, "source_id": row.source_id, "payload": row.raw_payload}
         for row in rows
     ]
+
+
+def _now() -> float:
+    """The monotonic clock, named so a test can hold it still.
+
+    A budget measured against the real clock can only be tested by making it
+    small enough to expire, and "small enough" races the first record: at a
+    microsecond the loop sometimes stops before doing anything at all. Naming
+    the call makes the elapsed time an input rather than a coincidence.
+    """
+    return time.monotonic()
 
 
 def count_unenriched(engine: Engine) -> int:
@@ -100,14 +113,35 @@ async def _enrich_all(
     engine: Engine,
     records: list[dict[str, Any]],
     report: EnrichReport,
+    *,
+    budget_seconds: float,
 ) -> None:
     loader = CatalogueLoader()
     client = extractor.build_client()
 
     total = len(records)
+    started = _now()
 
     try:
         for index, record in enumerate(records, start=1):
+            elapsed = _now() - started
+            if budget_seconds and elapsed >= budget_seconds:
+                # Stop on our own terms rather than be stopped. The slice is a
+                # guess at how much fits; a block turns a 27-minute run into a
+                # 50-minute one and the guess stops holding. Ending here keeps
+                # the records already loaded and reports honestly, where
+                # running on hands the decision to Airflow's timeout, which
+                # kills the task and marks the whole run failed.
+                report.stopped_early = True
+                logger.info(
+                    "enrich.budget_spent",
+                    seconds=round(elapsed),
+                    at=index - 1,
+                    of=total,
+                    enriched=report.enriched,
+                )
+                break
+
             if extractor.circuit_open:
                 # Stop for the run either way — the backlog is not going
                 # anywhere. Only a refusal earns the cross-run cooldown: a run
@@ -215,7 +249,15 @@ def enrich_goodreads(
         report.run_id = start_run(connection)
 
     try:
-        asyncio.run(_enrich_all(extractor, active, records, report))
+        asyncio.run(
+            _enrich_all(
+                extractor,
+                active,
+                records,
+                report,
+                budget_seconds=settings.enrich_max_run_seconds,
+            )
+        )
     except Exception:
         with active.begin() as connection:
             finalise_run(connection, report.run_id, status="failed")
@@ -240,5 +282,6 @@ def enrich_goodreads(
         queried=report.queried,
         enriched=report.enriched,
         loaded=report.loaded,
+        stopped_early=report.stopped_early,
     )
     return report

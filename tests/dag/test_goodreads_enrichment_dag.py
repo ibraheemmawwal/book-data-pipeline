@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from pipeline.config import Settings
+
 DAG_ID = "goodreads_enrichment"
 
 pytestmark = pytest.mark.dag
@@ -58,17 +60,25 @@ class TestPacing:
         """
         assert dagbag.dags[DAG_ID].catchup is False
 
-    def test_a_run_is_capped_below_its_interval(self, dagbag: Any) -> None:
-        """The timeout has to be shorter than the gap between runs.
+    def test_the_timeout_is_a_backstop_not_a_bound(self, dagbag: Any) -> None:
+        """It must sit well clear of the run's own budget.
 
-        A run that outlives its interval holds the only slot, so the next
-        interval queues behind it instead of starting — which is how a slow run
-        turns into a permanent backlog of scheduled runs.
+        The run stops itself at ``enrich_max_run_seconds``. If the timeout were
+        anywhere near that it would race the budget and go back to killing runs
+        that were about to finish tidily — which is what it did to a 500-record
+        run at record 206, discarding the outcome of 181 records it had already
+        loaded and reporting the run as failed.
+
+        It stays because it is the only thing that catches a task that is stuck
+        rather than slow: the budget is checked between records, so a loop that
+        never returns never reaches it. With one run at a time, a hung task
+        holds the only slot and nothing fails, so nothing alerts.
         """
         timeout = dagbag.dags[DAG_ID].get_task("fetch_detail").execution_timeout
+        budget = timedelta(seconds=Settings().enrich_max_run_seconds)
 
-        assert timeout == timedelta(minutes=50)
-        assert timeout < timedelta(hours=1)
+        assert timeout is not None
+        assert timeout > budget * 2
 
     def test_the_slice_is_overridable_from_the_trigger_page(self, dagbag: Any) -> None:
         # Working through a backlog by hand wants a different size from the

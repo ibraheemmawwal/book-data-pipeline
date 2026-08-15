@@ -201,6 +201,103 @@ class TestEnriching:
         assert report.queried == 2
 
 
+def _clock(*ticks: float) -> Any:
+    """A monotonic clock that reads the given values, then holds the last."""
+    remaining = list(ticks)
+
+    def read() -> float:
+        return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    return read
+
+
+class TestTheRunsOwnBudget:
+    """Stopping on our own terms rather than being stopped.
+
+    The slice guesses how much work fits in the interval, and the guess stops
+    holding the moment the source misbehaves — two blocks at five minutes each
+    turned a 500-record run into a 50-minute one, which Airflow killed at
+    record 206. The 181 records already loaded survived, because each is loaded
+    as it is fetched, but the run reported failure.
+
+    A run that notices it is out of time stops between records and reports what
+    it did. The backlog is unchanged by stopping and the next run continues
+    from the same queue, so the honest outcome is a short success.
+    """
+
+    @staticmethod
+    def _budgeted(engine: Engine, seconds: float) -> Settings:
+        return settings_for(str(engine.url)).model_copy(update={"enrich_max_run_seconds": seconds})
+
+    def test_a_spent_budget_stops_between_records(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        CatalogueLoader().load(engine, [imported(f"gr-4{n}") for n in range(5)])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id",
+            _answers({"pages": 100}),
+        )
+        # Start at 0, one record inside the budget, then past it.
+        monkeypatch.setattr("pipeline.enrich._now", _clock(0.0, 0.0, 999.0))
+
+        report = enrich_goodreads(self._budgeted(engine, 60.0), limit=5, engine=engine)
+
+        assert report.stopped_early is True
+        assert report.enriched == 1
+
+    def test_what_it_reached_before_stopping_is_kept(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stopping early banks the work rather than discarding it.
+
+        This is what makes an oversized ``limit`` safe to pass by hand: it
+        bounds the work, not the run.
+        """
+        CatalogueLoader().load(engine, [imported(f"gr-5{n}") for n in range(4)])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id",
+            _answers({"pages": 100}),
+        )
+        monkeypatch.setattr("pipeline.enrich._now", _clock(0.0, 0.0, 0.0, 999.0))
+
+        report = enrich_goodreads(self._budgeted(engine, 60.0), limit=4, engine=engine)
+
+        assert report.loaded == report.enriched == 2
+        assert count_unenriched(engine) == 2, "the rest stay pending for the next run"
+
+    def test_a_run_inside_its_budget_says_so(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Otherwise "stopped early" would be indistinguishable from "finished".
+        CatalogueLoader().load(engine, [imported(f"gr-7{n}") for n in range(3)])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id",
+            _answers({"pages": 100}),
+        )
+        monkeypatch.setattr("pipeline.enrich._now", _clock(0.0))
+
+        report = enrich_goodreads(self._budgeted(engine, 60.0), limit=3, engine=engine)
+
+        assert report.stopped_early is False
+        assert report.enriched == 3
+
+    def test_zero_disables_the_budget(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Otherwise an unset value would be the one that does no work at all.
+        CatalogueLoader().load(engine, [imported(f"gr-6{n}") for n in range(4)])
+        monkeypatch.setattr(
+            "pipeline.extract.goodreads.GoodreadsExtractor.enrich_by_id",
+            _answers({"pages": 100}),
+        )
+        monkeypatch.setattr("pipeline.enrich._now", _clock(0.0, 999_999.0))
+
+        report = enrich_goodreads(self._budgeted(engine, 0), limit=4, engine=engine)
+
+        assert report.stopped_early is False
+        assert report.enriched == 4
+
+
 class TestGatesAndEmptiness:
     def test_it_refuses_when_the_source_is_not_accepted(self, engine: Engine) -> None:
         # A bulk backlog is exactly where the acknowledgement matters most.

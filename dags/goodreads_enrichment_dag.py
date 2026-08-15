@@ -49,9 +49,20 @@ DEFAULT_ARGS: dict[str, Any] = {
     # work plus a 10-minute wait plus 17 more already overruns the half hour.
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
-    # Shorter than the interval it runs in, so a stuck run is killed before the
-    # next one is due rather than holding the slot and queueing it.
-    "execution_timeout": timedelta(minutes=50),
+    # A backstop, not a bound. The run now keeps its own wall-clock budget
+    # (``enrich_max_run_seconds``, 40 minutes) and stops itself between
+    # records, so this should never be what ends a run — when it was the
+    # operative limit it killed a 500-record run at record 206 and marked the
+    # whole thing failed, having banked 181 records it then reported as a
+    # failure.
+    #
+    # Kept, and set far above the budget, because it is the only thing that
+    # catches a task that is genuinely stuck rather than merely slow — a hung
+    # socket or a wedged connection, where the loop never reaches the check
+    # between records. With max_active_runs=1 a hung task holds the only slot,
+    # every later interval queues behind it, and nothing fails, so nothing
+    # alerts: enrichment would simply stop, quietly, until someone looked.
+    "execution_timeout": timedelta(hours=2),
 }
 
 
@@ -166,6 +177,7 @@ def goodreads_enrichment() -> None:
             "unchanged": report.unchanged,
             "failed": report.failed,
             "loaded": report.loaded,
+            "stopped_early": report.stopped_early,
             "run_id": str(report.run_id) if report.run_id else None,
             "errors": report.errors[:5],
         }
@@ -187,6 +199,10 @@ def goodreads_enrichment() -> None:
             enriched=outcome.get("enriched", 0),
             remaining=remaining,
             skipped=outcome.get("skipped"),
+            # A run that spent its budget did not fall short of the slice, it
+            # ran out of hour. Without this the two are indistinguishable in
+            # the numbers.
+            stopped_early=outcome.get("stopped_early", False),
         )
         return {**outcome, "remaining": remaining}
 
