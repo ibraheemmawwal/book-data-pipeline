@@ -12,6 +12,12 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from pipeline.config import MAX_GOODREADS_REQUESTS_PER_SECOND, Settings, SourceName
+from pipeline.extract.goodreads import BLOCK_BACKOFF_FACTOR, BLOCK_BACKOFF_SECONDS
+
+# Airflow's ``scheduler.task_instance_heartbeat_timeout`` default. A task that
+# goes quiet for longer is treated as dead and killed, so it is a hard ceiling
+# on any single wait the pipeline takes inside a task.
+AIRFLOW_HEARTBEAT_TIMEOUT_SECONDS = 300.0
 
 
 @pytest.fixture(autouse=True)
@@ -315,6 +321,35 @@ class TestTheGoodreadsRate:
                 openlibrary_contact_email="t@example.com",
                 goodreads_requests_per_second=MAX_GOODREADS_REQUESTS_PER_SECOND + 1,
             )
+
+    def test_no_single_block_wait_outlives_an_airflow_heartbeat(self) -> None:
+        """A wait long enough to look dead gets the task killed.
+
+        Airflow fails a task that stops heartbeating for
+        ``scheduler.task_instance_heartbeat_timeout`` — 300 seconds by default.
+        A five-minute block wait sat exactly on it and was killed by it, so the
+        mechanism for surviving a block was what ended the run.
+
+        Patience comes from the number of waits now, not the length of one.
+        """
+        settings = self._settings()
+
+        assert settings.goodreads_block_pause_seconds < AIRFLOW_HEARTBEAT_TIMEOUT_SECONDS
+
+    def test_the_waits_still_outlast_a_measured_block(self) -> None:
+        # Cutting the ceiling must not cut the total: a block took four to five
+        # minutes to lift, and the ladder has to survive one.
+        settings = self._settings()
+        ladder = [
+            min(
+                settings.goodreads_block_pause_seconds,
+                BLOCK_BACKOFF_SECONDS * BLOCK_BACKOFF_FACTOR ** (attempt - 1),
+            )
+            for attempt in range(1, settings.goodreads_block_retries + 1)
+        ]
+
+        assert ladder == [10.0, 60.0, 120.0, 120.0, 120.0]
+        assert sum(ladder) > 300.0
 
     def test_only_one_request_may_be_in_flight(self) -> None:
         # Pacing and concurrency are separate promises; slowing down must not

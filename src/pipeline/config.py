@@ -249,16 +249,28 @@ class Settings(BaseSettings):
     # measurement with a little margin.
     #
     # This is the *ceiling* on one wait, not every wait. The waits escalate —
-    # ten seconds, a minute, five minutes — because "blocked" covers two
+    # ten seconds, a minute, then two — because "blocked" covers two
     # different events: measured at five seconds between requests, the first
     # was refused and the next succeeded, while a bad one took between four and
     # five minutes to lift. A flat five minutes paid the worst case every time.
     #
-    # Three waits, so a block costs at most about six minutes of a run that has
-    # an hour. Surviving all three is the evidence that this is not the block
-    # we measured, and only then does the run end and the cooldown apply.
-    goodreads_block_pause_seconds: Annotated[float, Field(ge=0, le=1800)] = 300.0
-    goodreads_block_retries: Annotated[int, Field(ge=0, le=10)] = 3
+    # Two minutes, not five, and five waits rather than three — because
+    # Airflow kills a task that stops heartbeating for
+    # ``scheduler.task_instance_heartbeat_timeout``, which defaults to exactly
+    # 300 seconds. A single five-minute wait sat right on that threshold and
+    # was killed by it: the run of 2026-08-15T02:47 waited 10s, 60s, then 300s,
+    # and was marked failed and SIGKILLed 5m37s into the last one. The
+    # mechanism for surviving a block was the thing ending the run.
+    #
+    # So the total patience is kept and the individual sleeps are cut below the
+    # threshold: 10s, 60s, then 120s three times is about seven minutes, which
+    # still outlasts the four-to-five-minute block we measured, with no single
+    # wait over two minutes.
+    #
+    # Surviving all five is the evidence that this is not the block we
+    # measured, and only then does the run end and the cooldown apply.
+    goodreads_block_pause_seconds: Annotated[float, Field(ge=0, le=1800)] = 120.0
+    goodreads_block_retries: Annotated[int, Field(ge=0, le=10)] = 5
     # How long every path stays away after Goodreads refuses us.
     #
     # The breaker stops one run; this stops the next one. Airflow gives each
