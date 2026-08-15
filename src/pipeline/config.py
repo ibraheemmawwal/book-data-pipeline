@@ -176,19 +176,28 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 50, paired with an hourly run.
+    # 40, paired with an hourly run.
     #
-    # A record costs 1.36 requests, measured over 1,089 enriched: 700 needed
-    # only the book page, 389 also needed the editions page because the first
-    # withheld an ISBN or a year. At thirty seconds a request that is about 41
-    # seconds a record, so 50 is roughly 34 minutes of the hour.
+    # A record costs 1.36 requests in principle, measured over 1,089 enriched:
+    # 700 needed only the book page, 389 also needed the editions page because
+    # the first withheld an ISBN or a year. That is 41 seconds a record at
+    # thirty seconds a request, and it is not what a record actually costs.
     #
-    # 50 hourly and 25 half-hourly are the same 50 records an hour, and the
-    # hourly form has more room in it. What a run risks overrunning by is
-    # mostly fixed rather than per-record — up to six minutes of block
-    # escalation, plus task startup — so doubling the slice spreads that cost
-    # over twice the records: 34 + 6 of 60 leaves a third of the interval
-    # spare, where 17 + 6 of 30 leaves under a quarter.
+    # Timed end to end over a real run of 10, it is 52 seconds — 1.7 requests a
+    # record, not 1.36. The difference is Goodreads' own 503s, which run at
+    # about a third of requests and each cost a full retry at full spacing. The
+    # planning figure counted the requests we mean to make; this one counts the
+    # requests we make.
+    #
+    # So 40, not 50. 40 x 52s is 35 minutes, and a block ladder can add seven
+    # on top of that — 42 against a 50-minute timeout. 50 would have been 43
+    # plus seven, which is 50 exactly, and a run killed on its timeout is the
+    # heartbeat failure again in a different place.
+    #
+    # Hourly rather than half-hourly, because what a run risks overrunning by
+    # is mostly fixed rather than per-record — the block ladder, plus task
+    # startup — so a longer interval absorbs it better at the same records per
+    # hour.
     #
     # The bigger slice risks nothing, because each record is loaded as it is
     # fetched. A run that dies at record 40 keeps 40 records.
@@ -197,7 +206,7 @@ class Settings(BaseSettings):
     # We know the budget is about eight requests and that it clears in roughly
     # five minutes; we do not know how long it remembers, so the wider gap is
     # the cheap side to be wrong on.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 50
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 40
 
     enrich_from_documented_sources: bool = False
 
