@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from pipeline.config import MAX_GOODREADS_REQUESTS_PER_SECOND, Settings, SourceName
 from pipeline.extract.goodreads import BLOCK_BACKOFF_FACTOR, BLOCK_BACKOFF_SECONDS
+from pipeline.transform.canonicalise import SOURCE_PRIORITY
 
 # Airflow's ``scheduler.task_instance_heartbeat_timeout`` default. A task that
 # goes quiet for longer is treated as dead and killed, so it is a hard ceiling
@@ -356,3 +357,90 @@ class TestTheGoodreadsRate:
         # Pacing and concurrency are separate promises; slowing down must not
         # quietly permit two at once.
         assert self._settings().goodreads_max_in_flight == 1
+
+
+class TestTheDeployedProfile:
+    """What production is configured to be, pinned so it cannot drift quietly.
+
+    Every Goodreads gate defaults to false, which is the right default — a
+    clean clone must run the documented-API path, and enabling an unofficial
+    source has to be a deliberate act. The cost of that default is that the
+    deployed hierarchy is assembled entirely from environment variables, and
+    nothing in the repository says what the intended assembly is.
+
+    So a misconfigured deploy does not fail. It succeeds against a different
+    hierarchy: Goodreads is the preferred resolver for title, author,
+    description, series and edition facts, and without it those come from
+    whichever source answered, silently and with no error anywhere.
+
+    These tests are the written-down intent. They do not read deployment
+    config — they state what the flags must be for the deployment to be the one
+    the design describes, so a change to the defaults has to come past them.
+
+    Note which flags that is: two, not three. ``goodreads_in_resolution`` stays
+    false in production as well, and the reason is below.
+    """
+
+    @staticmethod
+    def _deployed() -> Settings:
+        """The two gates production sets, and deliberately not a third."""
+        return Settings(  # type: ignore[call-arg]
+            database_url="postgresql+psycopg://u:p@localhost/db",
+            openlibrary_contact_email="t@example.com",
+            goodreads_enabled=True,
+            goodreads_unofficial_source_accepted=True,
+        )
+
+    def test_both_extraction_gates_are_needed(self) -> None:
+        # Either one left unset silently removes Goodreads, and neither is more
+        # obvious than the other.
+        for omitted in ("goodreads_enabled", "goodreads_unofficial_source_accepted"):
+            settings = self._deployed().model_copy(update={omitted: False})
+
+            assert settings.skip_reason(SourceName.GOODREADS) is not None, (
+                f"{omitted} left unset would let Goodreads run"
+            )
+
+    def test_goodreads_stays_out_of_general_resolution(self) -> None:
+        """The third gate stays off in production, on purpose.
+
+        It is tempting to read three false flags as three things a deploy
+        forgot. This one is a decision: putting Goodreads on the resolution
+        path means asking it about every candidate, which is exactly what its
+        terms do not support. Enrichment and contested resolution use it
+        against a bounded set of books instead.
+
+        Pinned because "turn on all the Goodreads flags" is the obvious wrong
+        fix for a hierarchy that looks incomplete.
+        """
+        assert self._deployed().goodreads_in_resolution is False
+
+    def test_the_deployed_profile_actually_runs_goodreads(self) -> None:
+        assert self._deployed().skip_reason(SourceName.GOODREADS) is None
+
+    def test_goodreads_is_the_preferred_resolver(self) -> None:
+        """The hierarchy the deployment depends on.
+
+        Priority breaks ties between two equally complete answers, and
+        Goodreads winning those is the reason it is in resolution at all. If
+        this order changes, the deployed catalogue changes with it.
+        """
+        assert SOURCE_PRIORITY[SourceName.GOODREADS] < SOURCE_PRIORITY[SourceName.GOOGLEBOOKS]
+        assert SOURCE_PRIORITY[SourceName.GOOGLEBOOKS] < SOURCE_PRIORITY[SourceName.OPENLIBRARY]
+        assert SOURCE_PRIORITY[SourceName.OPENLIBRARY] < SOURCE_PRIORITY[SourceName.GUTENDEX]
+
+    def test_a_clean_clone_still_runs_without_goodreads(self) -> None:
+        """The default has to remain a working pipeline, not a broken one.
+
+        This is what makes the safe default safe: the documented-API path is a
+        complete configuration, so the gates are a choice rather than a step
+        everyone must remember.
+        """
+        clean = Settings(  # type: ignore[call-arg]
+            database_url="postgresql+psycopg://u:p@localhost/db",
+            openlibrary_contact_email="t@example.com",
+        )
+
+        assert clean.skip_reason(SourceName.GOODREADS) is not None
+        assert clean.skip_reason(SourceName.OPENLIBRARY) is None
+        assert SourceName.OPENLIBRARY in clean.active_sources()

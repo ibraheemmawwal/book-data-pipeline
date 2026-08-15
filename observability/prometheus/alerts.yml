@@ -1,0 +1,64 @@
+# Alerts for the one thing here that is actually scraped.
+#
+# The review that prompted these asked for alerts on API latency, Neon pool
+# exhaustion, DAG failures and Goodreads block rate. None of those are written
+# here, because none of them are exported: the pipeline publishes no Prometheus
+# metrics of its own and the API is not scraped. A rule against a metric that
+# does not exist never fires and never errors — it reads as coverage while
+# providing none, which is worse than the gap it appears to close.
+#
+# So: Kafka only, and the gap is recorded rather than papered over.
+groups:
+  - name: kafka
+    rules:
+      - alert: KafkaExporterDown
+        expr: up{job="kafka"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka exporter is not answering"
+          description: >-
+            Every other alert here depends on this scrape, so this one firing
+            means the rest have gone quiet rather than green.
+
+      - alert: KafkaBrokerDown
+        expr: kafka_brokers < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Kafka broker is reachable"
+          description: >-
+            The consumers stay up and idle when the broker goes away, so
+            nothing fails — the pipeline simply stops moving records.
+
+      # Lag alone is not a fault: a discovery run deliberately produces faster
+      # than the consumers drain, and that backlog clearing is the system
+      # working. What is a fault is lag that stops falling.
+      - alert: KafkaConsumerLagNotDraining
+        expr: |
+          sum by (consumergroup) (kafka_consumergroup_lag) > 1000
+          and
+          deriv(sum by (consumergroup) (kafka_consumergroup_lag)[15m:]) >= 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.consumergroup }} lag is not going down"
+          description: >-
+            Over 1000 messages behind and flat or growing for 15 minutes. A
+            burst from a discovery run looks like this for a few minutes and
+            then drains; this does not.
+
+      - alert: KafkaConsumerGroupEmpty
+        expr: kafka_consumergroup_members == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.consumergroup }} has no members"
+          description: >-
+            A consumer group with no members is the failure that looks most
+            like health: lag stops changing, no errors are logged, and the
+            topic quietly fills.
