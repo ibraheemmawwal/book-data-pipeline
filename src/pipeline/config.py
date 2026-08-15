@@ -176,25 +176,20 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 100, paired with an hourly run.
+    # 200, paired with an hourly run.
     #
-    # A record needs 1.36 requests of its own — measured over 1,089 enriched:
-    # 700 wanted only the book page, 389 also wanted the editions page because
-    # the first withheld an ISBN or a year — and Goodreads' own 503s, running
-    # at a quarter to a third of requests, push the real figure to about 2.2
-    # once retries are counted. At five seconds apart that is roughly 11
-    # seconds a record.
+    # Timed over a full run rather than estimated: 100 records in 13.7 minutes,
+    # 8.2 seconds each. 93 enriched, 7 with nothing new to add, 44 transient
+    # retries across roughly 180 requests — a 503 rate of about a quarter,
+    # which is what the estimate already assumed.
     #
-    # So 100 records is about 18 minutes, and a block ladder can add seven on
-    # top: 25 minutes against a 50-minute timeout inside an hourly interval.
-    # The margin is deliberately much wider than the arithmetic needs, because
-    # the spacing this rests on is a single 16-request sample and the previous
-    # one aged badly. A run that overruns its timeout is the failure mode that
-    # has already bitten twice.
+    # 200 is 27 minutes, and a block ladder can add seven: 35 against a
+    # 50-minute timeout inside an hourly interval. 250 would still fit on
+    # paper and is not worth the thinner margin, because a run that overruns
+    # its timeout is the failure mode that has already bitten twice.
     #
-    # The next real run is the number to trust over this one. If 11 seconds
-    # holds, the backlog clears in about four days and the slice can go up.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 100
+    # 200 an hour clears the remaining 9,406 in about two days.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 200
 
     enrich_from_documented_sources: bool = False
 
@@ -228,10 +223,18 @@ class Settings(BaseSettings):
     # scraper that collected these same pages at two seconds and never saw a
     # block.
     #
-    # What makes five safe to hold is that nothing here depends on the block
-    # being gone: the escalating waits, the breaker and the cross-run cooldown
-    # all still stand, and they are what turn a block that returns into a
-    # pause rather than a failed run. If it returns often, the walk is cheap to
+    # It does still return. Of the first two runs at this spacing, one was
+    # blocked inside two minutes and ended with 2 records; the next took 100
+    # in 13.7 minutes without a single block. Episodic means episodic, and the
+    # sixteen clean requests that justified this change were luck as much as
+    # evidence.
+    #
+    # What makes five safe to hold anyway is that nothing here depends on the
+    # block being gone: the escalating waits, the breaker and the cross-run
+    # cooldown all still stand, and they turn a block that returns into a run
+    # that ends early with its records kept rather than a run that loses them.
+    # Every record is loaded as it is fetched, so a blocked run is slow, not
+    # wasted. If the failures outnumber the clean runs the walk is cheap to
     # repeat — and the ceiling above still caps anything faster.
     goodreads_requests_per_second: Annotated[
         float, Field(gt=0, le=MAX_GOODREADS_REQUESTS_PER_SECOND)
