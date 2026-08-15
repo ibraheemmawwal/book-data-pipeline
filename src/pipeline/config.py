@@ -176,37 +176,25 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 40, paired with an hourly run.
+    # 100, paired with an hourly run.
     #
-    # A record costs 1.36 requests in principle, measured over 1,089 enriched:
-    # 700 needed only the book page, 389 also needed the editions page because
-    # the first withheld an ISBN or a year. That is 41 seconds a record at
-    # thirty seconds a request, and it is not what a record actually costs.
+    # A record needs 1.36 requests of its own — measured over 1,089 enriched:
+    # 700 wanted only the book page, 389 also wanted the editions page because
+    # the first withheld an ISBN or a year — and Goodreads' own 503s, running
+    # at a quarter to a third of requests, push the real figure to about 2.2
+    # once retries are counted. At five seconds apart that is roughly 11
+    # seconds a record.
     #
-    # Timed end to end over a real run of 10, it is 52 seconds — 1.7 requests a
-    # record, not 1.36. The difference is Goodreads' own 503s, which run at
-    # about a third of requests and each cost a full retry at full spacing. The
-    # planning figure counted the requests we mean to make; this one counts the
-    # requests we make.
+    # So 100 records is about 18 minutes, and a block ladder can add seven on
+    # top: 25 minutes against a 50-minute timeout inside an hourly interval.
+    # The margin is deliberately much wider than the arithmetic needs, because
+    # the spacing this rests on is a single 16-request sample and the previous
+    # one aged badly. A run that overruns its timeout is the failure mode that
+    # has already bitten twice.
     #
-    # So 40, not 50. 40 x 52s is 35 minutes, and a block ladder can add seven
-    # on top of that — 42 against a 50-minute timeout. 50 would have been 43
-    # plus seven, which is 50 exactly, and a run killed on its timeout is the
-    # heartbeat failure again in a different place.
-    #
-    # Hourly rather than half-hourly, because what a run risks overrunning by
-    # is mostly fixed rather than per-record — the block ladder, plus task
-    # startup — so a longer interval absorbs it better at the same records per
-    # hour.
-    #
-    # The bigger slice risks nothing, because each record is loaded as it is
-    # fetched. A run that dies at record 40 keeps 40 records.
-    #
-    # It also leaves the source a longer quiet gap — 26 minutes rather than 13.
-    # We know the budget is about eight requests and that it clears in roughly
-    # five minutes; we do not know how long it remembers, so the wider gap is
-    # the cheap side to be wrong on.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 40
+    # The next real run is the number to trust over this one. If 11 seconds
+    # holds, the backlog clears in about four days and the slice can go up.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 100
 
     enrich_from_documented_sources: bool = False
 
@@ -220,35 +208,54 @@ class Settings(BaseSettings):
     goodreads_enabled: bool = False
     goodreads_unofficial_source_accepted: bool = False
     goodreads_base_url: str = "https://www.goodreads.com"
-    # One request every thirty seconds.
+    # One request every five seconds.
     #
-    # Measured, by walking the spacing out and counting what came back:
+    # Thirty came from a spacing walk taken while a block was in progress:
     #
     #     2s  ->  8 of 12, then blocked
     #     5s  ->  8 of 12, then blocked
     #    15s  ->  7 of 18: eight straight successes, then blocked and stayed
     #    30s  -> 13 of 13, never blocked
     #
-    # The shape is a rolling budget of roughly eight requests, not a rate. Under
-    # about thirty seconds apart the budget runs out and everything answers 202
-    # with an empty body for the next five minutes; at thirty it never runs out.
+    # Read as a rolling budget of about eight requests. Re-run days later, the
+    # same walk does not reproduce: 16 consecutive requests at five seconds
+    # returned zero blocks, and 16 at thirty returned zero. What differs
+    # between those two sets is only the 503 rate — 6 of 16 against 4 of 16,
+    # which at this sample size is not a difference at all.
     #
-    # So this is slower per request and faster overall, which is the part worth
-    # remembering. At two seconds a run spent five minutes blocked for every
-    # eight books it fetched, and managed about 37 books an hour. At thirty
-    # seconds nothing is ever lost to a block.
+    # So the block is episodic, not a standing budget, and thirty seconds was
+    # paying for it around the clock. Five is also more conservative than the
+    # scraper that collected these same pages at two seconds and never saw a
+    # block.
+    #
+    # What makes five safe to hold is that nothing here depends on the block
+    # being gone: the escalating waits, the breaker and the cross-run cooldown
+    # all still stand, and they are what turn a block that returns into a
+    # pause rather than a failed run. If it returns often, the walk is cheap to
+    # repeat — and the ceiling above still caps anything faster.
     goodreads_requests_per_second: Annotated[
         float, Field(gt=0, le=MAX_GOODREADS_REQUESTS_PER_SECOND)
-    ] = 1.0 / 30.0
+    ] = 1.0 / 5.0
     goodreads_max_in_flight: Annotated[int, Field(ge=1, le=1)] = 1
     # Hard timeout: an unofficial contract must never hold a run open.
     goodreads_timeout_seconds: Annotated[float, Field(gt=0, le=30)] = 5.0
     goodreads_circuit_failure_threshold: Annotated[int, Field(ge=1)] = 5
     # Retries for a transient failure — 5xx or a dropped connection — before it
-    # counts against the breaker at all. Goodreads currently serves 503 to
-    # about one request in three while answering the rest in full, and those
-    # 503s cluster, so without this an ordinary wobble reads as a block.
-    goodreads_transient_retries: Annotated[int, Field(ge=0, le=10)] = 3
+    # counts against the breaker at all. Goodreads serves 503 to about a
+    # quarter of requests while answering the rest in full, so without this an
+    # ordinary wobble reads as a block.
+    #
+    # Two, not three. The third retry is the expensive one and it almost never
+    # earns its place: measured at 30s spacing, the 503s scatter rather than
+    # cluster — 4 of 16, at positions 1, 3, 10 and 11 — which is a source
+    # failing at random, not one refusing us in runs. Against random failure a
+    # third attempt recovers a further ~1.5% of records and costs every
+    # already-doomed record another 30 seconds. Two attempts after the first
+    # already clear about 98%.
+    #
+    # A record that fails all three stays pending and is picked up by a later
+    # run, which is the cheaper place to spend the attempt.
+    goodreads_transient_retries: Annotated[int, Field(ge=0, le=10)] = 2
     # Waiting out a block, rather than ending the run over it.
     #
     # The block is global — the minute the backlog's records returned 202 and

@@ -58,10 +58,10 @@ DEFAULT_ARGS: dict[str, Any] = {
 @dag(
     dag_id=DAG_ID,
     # Hourly, and bounded by what the source will bear rather than by how fast
-    # we could go. At one request every thirty seconds — the spacing at which
-    # the block stops triggering at all — a record costs 52 seconds measured
-    # end to end, so 40 records is about 35 minutes and a run finishes with
-    # most of a third of its hour spare.
+    # we could go. At one request every five seconds a record costs about 11
+    # seconds once Goodreads' own 503s and their retries are counted, so 100
+    # records is roughly 18 minutes and a run finishes with well over half its
+    # hour spare.
     #
     # Spare time in the interval is the whole point: a run that outlives its
     # interval holds the only slot, so the next interval queues behind it

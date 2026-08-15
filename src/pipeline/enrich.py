@@ -104,8 +104,10 @@ async def _enrich_all(
     loader = CatalogueLoader()
     client = extractor.build_client()
 
+    total = len(records)
+
     try:
-        for record in records:
+        for index, record in enumerate(records, start=1):
             if extractor.circuit_open:
                 # Stop for the run either way — the backlog is not going
                 # anywhere. Only a refusal earns the cross-run cooldown: a run
@@ -117,23 +119,54 @@ async def _enrich_all(
             observation = map_payload(SourceName.GOODREADS, record["payload"])
             if isinstance(observation, Rejected):
                 report.failed += 1
+                logger.info(
+                    "enrich.record_rejected",
+                    source_id=record["source_id"],
+                    reason=(observation.detail or "")[:80],
+                    at=index,
+                    of=total,
+                )
                 continue
 
             report.queried += 1
             full = await extractor.enrich_by_id(client, observation)
             if full is None:
                 report.unchanged += 1
+                logger.info(
+                    "enrich.record_unchanged",
+                    source_id=record["source_id"],
+                    at=index,
+                    of=total,
+                )
                 continue
 
             cleaned = canonicalise(full)
             if not isinstance(cleaned, CleanBook):
                 report.failed += 1
                 report.errors.append(f"{record['source_id']}: {cleaned.detail}"[:120])
+                logger.info(
+                    "enrich.record_failed",
+                    source_id=record["source_id"],
+                    reason=(cleaned.detail or "")[:80],
+                    at=index,
+                    of=total,
+                )
                 continue
 
             report.enriched += 1
             outcome = loader.load(engine, [cleaned], run_id=report.run_id)
             report.loaded += outcome.records_loaded
+            # Successes were the only thing this loop did not say out loud, so
+            # a healthy run read as a column of 503s with a total at the end.
+            # A retry is not more newsworthy than the record it recovered.
+            logger.info(
+                "enrich.record_enriched",
+                source_id=record["source_id"],
+                title=cleaned.title[:60],
+                at=index,
+                of=total,
+                enriched=report.enriched,
+            )
     finally:
         await client.aclose()
 

@@ -281,21 +281,22 @@ class TestThePlaceholderContact:
 
 
 class TestTheGoodreadsRate:
-    """One request every thirty seconds, and why that number.
+    """One request every five seconds, and why that number.
 
     The ceiling was always documented as a ceiling — "a lower observed safe
-    rate wins" — and the observation arrived by walking the spacing out and
-    counting what came back:
+    rate wins" — and the first observation, taken while a block was in
+    progress, walked the spacing out and read as a rolling budget of about
+    eight requests: blocked at 2s, 5s and 15s, clean only at 30s.
 
-        2s  ->  8 of 12, then blocked
-        5s  ->  8 of 12, then blocked
-       15s  ->  7 of 18: eight straight successes, then blocked and stayed
-       30s  -> 13 of 13, never blocked
+    Re-run days later it does not reproduce. Sixteen consecutive requests at
+    five seconds returned no block at all, and sixteen at thirty returned no
+    block either; the only difference between the two sets is the 503 rate, 6
+    of 16 against 4 of 16, which at that sample size is not a difference.
 
-    Eight requests regardless of how they were spread out, which is a rolling
-    budget rather than a rate — until thirty seconds, where it stops running
-    out. Slower per request and faster overall: at two seconds a run spent five
-    minutes blocked for every eight books it fetched.
+    So the block is episodic rather than a standing budget, and the machinery
+    that survives one — escalating waits, the breaker, the cross-run cooldown —
+    is what makes the faster spacing safe to hold rather than the block being
+    gone.
     """
 
     @staticmethod
@@ -306,7 +307,7 @@ class TestTheGoodreadsRate:
         )
 
     def test_the_default_is_the_observed_safe_rate(self) -> None:
-        assert self._settings().goodreads_requests_per_second == pytest.approx(1.0 / 30.0)
+        assert self._settings().goodreads_requests_per_second == pytest.approx(1.0 / 5.0)
 
     def test_it_stays_below_the_ceiling(self) -> None:
         settings = self._settings()
