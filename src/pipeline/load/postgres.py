@@ -27,7 +27,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Connection, Engine, delete, func, select, update
+from sqlalchemy import Connection, Engine, delete, func, literal, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 
@@ -57,7 +57,7 @@ from pipeline.transform import (
     payload_hash,
 )
 from pipeline.transform.identity import ISBN_PREFIX
-from pipeline.transform.series import series_search_text
+from pipeline.transform.series import NAME_SERIES_PREFIX, series_search_text
 
 logger = structlog.get_logger(__name__)
 
@@ -548,7 +548,87 @@ class CatalogueLoader:
             )
             .returning(series.c.id)
         ).one()
-        return int(row.id)
+        series_id = int(row.id)
+
+        if membership.confirmed and membership.source_series_id:
+            self._absorb_inferred_series(connection, series_id, membership.normalised_name)
+        return series_id
+
+    def _absorb_inferred_series(
+        self, connection: Connection, survivor_id: int, normalised_name: str
+    ) -> None:
+        """Fold a name-derived series row into the one a source has now named.
+
+        The identity key has two forms and which one a membership gets depends
+        on evidence that arrives over time. A series parsed out of a title is
+        ``series:<sha of normalised name>``; the same series carrying a
+        ``/series/`` id is ``srcseries:goodreads:<id>``. A book seen before the
+        detail fetch takes the first, the same book seen after takes the
+        second, and nothing brought them back together — so "The Expanse" was
+        two canonical rows, each holding half the books, and neither listing
+        the series completely.
+
+        Confirmation only ever travels one way, so this is one-directional:
+        the named row is the survivor and the inferred row is folded into it.
+        """
+        inferred_id = connection.execute(
+            select(series.c.id).where(
+                series.c.normalized_name == normalised_name,
+                series.c.identity_key.startswith(NAME_SERIES_PREFIX),
+                series.c.id != survivor_id,
+            )
+        ).scalar_one_or_none()
+        if inferred_id is None:
+            return
+
+        # Ascending id order, for the same reason the book merge takes its
+        # locks that way: two concurrent promotions must not deadlock.
+        first, second = sorted((survivor_id, int(inferred_id)))
+        connection.execute(
+            select(series.c.id)
+            .where(series.c.id.in_((first, second)))
+            .order_by(series.c.id)
+            .with_for_update()
+        ).all()
+
+        # Memberships first, and merged rather than skipped: a book on both
+        # rows usually knows its position on only one of them, and DO NOTHING
+        # would keep whichever row happened to exist.
+        statement = insert(book_series).from_select(
+            ["book_id", "series_id", "position", "confirmed"],
+            select(
+                book_series.c.book_id,
+                literal(survivor_id),
+                book_series.c.position,
+                book_series.c.confirmed,
+            ).where(book_series.c.series_id == inferred_id),
+        )
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["book_id", "series_id"],
+                set_={
+                    "position": func.coalesce(book_series.c.position, statement.excluded.position),
+                    "confirmed": book_series.c.confirmed | statement.excluded.confirmed,
+                },
+            )
+        )
+
+        # Then provenance, which has a foreign key to the membership above and
+        # so cannot move before it.
+        connection.execute(
+            update(book_series_sources)
+            .where(book_series_sources.c.series_id == inferred_id)
+            .values(series_id=survivor_id)
+        )
+        connection.execute(
+            update(series_sources)
+            .where(series_sources.c.series_id == inferred_id)
+            .values(series_id=survivor_id)
+        )
+
+        connection.execute(delete(book_series).where(book_series.c.series_id == inferred_id))
+        connection.execute(delete(series).where(series.c.id == inferred_id))
+        logger.info("load.series_promoted", survivor=survivor_id, absorbed=int(inferred_id))
 
     @staticmethod
     def _membership_payload(membership: CleanSeriesMembership) -> dict[str, Any]:
@@ -684,8 +764,21 @@ class CatalogueLoader:
         # array_agg over no rows is NULL, not an empty array.
         projection = series_search_text(list(row.names or []))
         if projection != row.series_search_text:
+            # updated_at moves with it. The projection is derived, so it is
+            # deliberately not part of content_hash — the hash covers what the
+            # sources said about the book, and this is a rollup of the
+            # relationship graph built from them, recomputed after the hash is
+            # written. But a book that becomes findable under a series name has
+            # changed in the only way a reader can observe, and leaving
+            # updated_at alone made that change invisible to anything syncing
+            # incrementally.
+            #
+            # Still guarded by the comparison above, so a book whose series did
+            # not move is not rewritten and the idempotency guarantee holds.
             connection.execute(
-                update(books).where(books.c.id == book_id).values(series_search_text=projection)
+                update(books)
+                .where(books.c.id == book_id)
+                .values(series_search_text=projection, updated_at=func.now())
             )
 
     def _sync_authors(

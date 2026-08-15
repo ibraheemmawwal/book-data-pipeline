@@ -1247,6 +1247,189 @@ class TestMembershipProvenance:
         assert count == 1
 
 
+class TestSeriesIdentityPromotion:
+    """One series, one row, however the evidence arrived.
+
+    The identity key has two forms and which one a membership gets depends on
+    what was known at the time. A series read out of a title is
+    ``series:<sha of the normalised name>``; the same series carrying a
+    ``/series/`` id is ``srcseries:goodreads:<id>``.
+
+    A book seen before its detail fetch takes the first form and the same book
+    seen after takes the second, so "The Expanse" became two canonical rows
+    holding half the books each — and neither of them listed the series
+    completely. Nothing errored, and a reader asking for the next volume got a
+    short answer that looked whole.
+    """
+
+    @staticmethod
+    def _record(source_id: str, *, series_id: str | None, position: str, isbn: str) -> CleanBook:
+        return _clean(
+            RawBook(
+                source=SourceName.GOODREADS,
+                source_id=source_id,
+                title=f"Expanse {position}",
+                isbns=[isbn],
+                series=[
+                    RawSeriesMembership(
+                        name="The Expanse",
+                        position=position,
+                        confirmed=series_id is not None,
+                        source_series_id=series_id,
+                    )
+                ],
+                raw_payload={
+                    "bookId": source_id,
+                    "title": f"Expanse {position}",
+                    "isbn13": isbn,
+                    "_detail": {
+                        "series_label": f"Book {position} in the The Expanse series",
+                        **({"series_id": series_id} if series_id else {}),
+                    },
+                },
+            )
+        )
+
+    def test_a_named_series_absorbs_the_inferred_one(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        loader = CatalogueLoader()
+        # Book one arrives with only a parsed label; book two brings the id.
+        loader.load(
+            engine, [self._record("gr-s1", series_id=None, position="1", isbn="9780316129169")]
+        )
+        loader.load(
+            engine, [self._record("gr-s2", series_id="45175", position="2", isbn="9780316129176")]
+        )
+
+        rows = connection.execute(
+            select(series.c.identity_key, series.c.name).order_by(series.c.identity_key)
+        ).all()
+
+        assert len(rows) == 1, (
+            f"the series split into {len(rows)} rows: {[r.identity_key for r in rows]}"
+        )
+        assert rows[0].identity_key == "srcseries:goodreads:45175"
+
+    def test_the_earlier_books_come_with_it(self, engine: Engine, connection: Connection) -> None:
+        """Promotion is worthless if it strands the books it was holding."""
+        loader = CatalogueLoader()
+        loader.load(
+            engine, [self._record("gr-s3", series_id=None, position="1", isbn="9780316129183")]
+        )
+        loader.load(
+            engine, [self._record("gr-s4", series_id="45175", position="2", isbn="9780316129190")]
+        )
+
+        survivor = connection.execute(
+            select(series.c.id).where(series.c.identity_key == "srcseries:goodreads:45175")
+        ).scalar_one()
+        members = connection.execute(
+            select(book_series.c.book_id, book_series.c.position)
+            .where(book_series.c.series_id == survivor)
+            .order_by(book_series.c.position)
+        ).all()
+
+        assert [int(m.position) for m in members] == [1, 2]
+
+    def test_the_absorbed_provenance_follows(self, engine: Engine, connection: Connection) -> None:
+        # book_series_sources has a foreign key to book_series, so a promotion
+        # that moved memberships without provenance would either orphan the
+        # rows or fail the constraint.
+        loader = CatalogueLoader()
+        loader.load(
+            engine, [self._record("gr-s5", series_id="45175", position="1", isbn="9780316129206")]
+        )
+        loader.load(
+            engine, [self._record("gr-s6", series_id="45175", position="2", isbn="9780316129213")]
+        )
+
+        survivor = connection.execute(
+            select(series.c.id).where(series.c.identity_key == "srcseries:goodreads:45175")
+        ).scalar_one()
+        stranded = connection.execute(
+            select(func.count())
+            .select_from(book_series_sources)
+            .where(book_series_sources.c.series_id != survivor)
+        ).scalar_one()
+
+        assert stranded == 0
+
+    def test_an_inferred_series_alone_is_left_as_it_is(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        """Promotion runs on confirmation, not on every load.
+
+        Without this the rule could be satisfied by collapsing every series
+        with a matching name, which would merge genuinely different series that
+        happen to share one.
+        """
+        CatalogueLoader().load(
+            engine, [self._record("gr-s7", series_id=None, position="1", isbn="9780316129220")]
+        )
+
+        row = connection.execute(select(series.c.identity_key)).scalar_one()
+
+        assert row.startswith("series:")
+
+
+class TestSeriesSearchTextIsVisible:
+    """A derived column still has to announce that it changed.
+
+    ``series_search_text`` is not part of ``content_hash`` and deliberately so:
+    the hash covers what the sources said about the book, and this is a rollup
+    of the relationship graph built from them, recomputed after the hash is
+    written.
+
+    But a book that becomes findable under a series name has changed in the
+    only way a reader can observe. Leaving ``updated_at`` alone made that
+    change invisible to anything syncing incrementally.
+    """
+
+    @staticmethod
+    def _stamp(connection: Connection, isbn: str) -> Any:
+        return connection.execute(
+            select(books.c.updated_at).where(books.c.isbn13 == isbn)
+        ).scalar_one()
+
+    def test_gaining_a_series_moves_updated_at(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        isbn = "9780316129237"
+        loader = CatalogueLoader()
+        # A book with an ISBN and no series, then the Goodreads record for the
+        # same ISBN, which brings one.
+        loader.load(engine, [openlibrary_payload("/works/OLT1", isbn=[isbn])])
+        before = self._stamp(connection, isbn)
+
+        loader.load(
+            engine,
+            [
+                TestSeriesIdentityPromotion._record(
+                    "gr-t1", series_id="45175", position="1", isbn=isbn
+                )
+            ],
+        )
+
+        assert self._stamp(connection, isbn) > before
+
+    def test_reloading_an_unchanged_book_does_not(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # The guarantee this must not break: a no-op load rewrites nothing.
+        isbn = "9780316129244"
+        loader = CatalogueLoader()
+        record = TestSeriesIdentityPromotion._record(
+            "gr-t2", series_id="45175", position="1", isbn=isbn
+        )
+        loader.load(engine, [record])
+        before = self._stamp(connection, isbn)
+
+        loader.load(engine, [record])
+
+        assert self._stamp(connection, isbn) == before
+
+
 class TestAMergeKeepsTheSeries:
     """What a merge must not quietly drop.
 
