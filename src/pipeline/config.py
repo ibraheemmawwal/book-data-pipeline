@@ -198,18 +198,25 @@ class Settings(BaseSettings):
     # seconds a record and then met two blocks, which cost five minutes each
     # and turned it into a 50-minute run that Airflow killed at record 206.
     #
-    # 40 minutes, against a 50-minute execution_timeout. The gap is one block
-    # ladder plus change, because the budget is only checked between records
-    # and the record in progress may be sitting inside one.
+    # Two hours. Deliberately far above what a scheduled run needs — a slice of
+    # 200 at 8.2 seconds is about 27 minutes — because this is not the bound on
+    # ordinary runs, the slice is. It is the bound on the run that is drained
+    # by hand with a large limit, which is the case that kept ending in a red
+    # task despite having done the work.
+    #
+    # The scheduled run reaches this only if blocks stretch 27 minutes past two
+    # hours, and with one run at a time that would hold the slot through two
+    # intervals. That is the trade being made: a queued interval, which drains,
+    # against a killed run, which reports failure over work it completed.
     #
     # A run that spends its budget stops and reports what it did. The records
     # are already loaded, the backlog is unchanged by stopping, and the next
     # run continues from the same queue — so the honest outcome is a short
-    # success, not a failure. This is what makes an oversized ``limit`` safe to
-    # pass by hand: it now bounds the work, not the run.
+    # success, not a failure.
+    #
     # Zero disables the budget rather than meaning "no time at all", which is
     # the reading that makes an unset value safe.
-    enrich_max_run_seconds: Annotated[float, Field(ge=0)] = 40 * 60
+    enrich_max_run_seconds: Annotated[float, Field(ge=0)] = 2 * 60 * 60
 
     enrich_from_documented_sources: bool = False
 

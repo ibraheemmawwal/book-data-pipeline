@@ -78,7 +78,9 @@ class TestPacing:
         budget = timedelta(seconds=Settings().enrich_max_run_seconds)
 
         assert timeout is not None
-        assert timeout > budget * 2
+        # Clear by more than the one block ladder a record can be sitting
+        # inside when the budget is checked, so the two never race.
+        assert timeout - budget >= timedelta(minutes=20)
 
     def test_the_slice_is_overridable_from_the_trigger_page(self, dagbag: Any) -> None:
         # Working through a backlog by hand wants a different size from the

@@ -56,13 +56,17 @@ DEFAULT_ARGS: dict[str, Any] = {
     # whole thing failed, having banked 181 records it then reported as a
     # failure.
     #
-    # Kept, and set far above the budget, because it is the only thing that
+    # Kept, and set clear of the budget, because it is the only thing that
     # catches a task that is genuinely stuck rather than merely slow — a hung
     # socket or a wedged connection, where the loop never reaches the check
     # between records. With max_active_runs=1 a hung task holds the only slot,
     # every later interval queues behind it, and nothing fails, so nothing
     # alerts: enrichment would simply stop, quietly, until someone looked.
-    "execution_timeout": timedelta(hours=2),
+    #
+    # Half an hour clear of the two-hour budget: comfortably more than the
+    # single block ladder a record can be sitting inside when the budget is
+    # checked, so the two can never race.
+    "execution_timeout": timedelta(hours=2, minutes=30),
 }
 
 
