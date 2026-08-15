@@ -176,19 +176,28 @@ class Settings(BaseSettings):
     # between runs gets used: 200 records is about ten minutes of it, which
     # leaves a 10,000-record backlog fifty hours away.
     #
-    # 25, paired with a run every half hour.
+    # 50, paired with an hourly run.
     #
     # A record costs 1.36 requests, measured over 1,089 enriched: 700 needed
     # only the book page, 389 also needed the editions page because the first
     # withheld an ISBN or a year. At thirty seconds a request that is about 41
-    # seconds a record, so 25 is roughly 17 minutes of a 30-minute interval.
+    # seconds a record, so 50 is roughly 34 minutes of the hour.
     #
-    # The pairing is the point. The slice cannot grow past what the interval
-    # holds — a run that overruns becomes a queued interval, and a task that
-    # times out counts towards the three failures that pause the DAG — so more
-    # throughput has to come from more intervals rather than longer runs. 25
-    # every half hour is 50 an hour where 35 hourly was 35, and both fit.
-    enrich_max_per_run: Annotated[int, Field(ge=0)] = 25
+    # 50 hourly and 25 half-hourly are the same 50 records an hour, and the
+    # hourly form has more room in it. What a run risks overrunning by is
+    # mostly fixed rather than per-record — up to six minutes of block
+    # escalation, plus task startup — so doubling the slice spreads that cost
+    # over twice the records: 34 + 6 of 60 leaves a third of the interval
+    # spare, where 17 + 6 of 30 leaves under a quarter.
+    #
+    # The bigger slice risks nothing, because each record is loaded as it is
+    # fetched. A run that dies at record 40 keeps 40 records.
+    #
+    # It also leaves the source a longer quiet gap — 26 minutes rather than 13.
+    # We know the budget is about eight requests and that it clears in roughly
+    # five minutes; we do not know how long it remembers, so the wider gap is
+    # the cheap side to be wrong on.
+    enrich_max_per_run: Annotated[int, Field(ge=0)] = 50
 
     enrich_from_documented_sources: bool = False
 

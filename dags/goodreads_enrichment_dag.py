@@ -51,23 +51,28 @@ DEFAULT_ARGS: dict[str, Any] = {
     "retry_delay": timedelta(minutes=10),
     # Shorter than the interval it runs in, so a stuck run is killed before the
     # next one is due rather than holding the slot and queueing it.
-    "execution_timeout": timedelta(minutes=25),
+    "execution_timeout": timedelta(minutes=50),
 }
 
 
 @dag(
     dag_id=DAG_ID,
-    # Every half hour, and bounded by what the source will bear rather than by
-    # how fast we could go. At one request every thirty seconds — the spacing
-    # at which the block stops triggering at all — 25 records is about 17
-    # minutes, so each run finishes with a third of its interval spare.
+    # Hourly, and bounded by what the source will bear rather than by how fast
+    # we could go. At one request every thirty seconds — the spacing at which
+    # the block stops triggering at all — 50 records is about 34 minutes, so a
+    # run finishes with most of a third of its hour spare.
     #
-    # Twice as often rather than twice as long, deliberately. Spare time in the
-    # interval is what stops a slow run turning into a queued one, and queued
-    # intervals are what made failing a run look like the DAG re-triggering
-    # itself. Throughput comes from the number of intervals; the slice only
-    # decides how much of one gets used.
-    schedule="17,47 * * * *",
+    # Spare time in the interval is the whole point: a run that outlives its
+    # interval holds the only slot, so the next interval queues behind it
+    # instead of starting, and a failed run then hands its slot straight to the
+    # queue. That is what made failing a run look like the DAG re-triggering
+    # itself.
+    #
+    # Hourly rather than half-hourly at the same records per hour, because what
+    # a run overruns by is mostly a fixed cost — up to six minutes of block
+    # escalation — and an hour absorbs six minutes better than half an hour
+    # does.
+    schedule="17 * * * *",
     start_date=pendulum.datetime(2026, 8, 1, tz="UTC"),
     catchup=False,
     # Two runs would fetch the same head of the queue twice and spend two runs'

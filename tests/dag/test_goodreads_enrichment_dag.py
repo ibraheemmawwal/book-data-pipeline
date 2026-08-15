@@ -53,8 +53,8 @@ class TestPacing:
     def test_it_does_not_catch_up(self, dagbag: Any) -> None:
         """Missed intervals must not become a burst.
 
-        Catchup on a half-hourly schedule after a day paused would fire
-        forty-eight runs at a source that had just started answering again.
+        Catchup on an hourly schedule after a day paused would fire twenty-four
+        runs at a source that had just started answering again.
         """
         assert dagbag.dags[DAG_ID].catchup is False
 
@@ -67,8 +67,8 @@ class TestPacing:
         """
         timeout = dagbag.dags[DAG_ID].get_task("fetch_detail").execution_timeout
 
-        assert timeout == timedelta(minutes=25)
-        assert timeout < timedelta(minutes=30)
+        assert timeout == timedelta(minutes=50)
+        assert timeout < timedelta(hours=1)
 
     def test_the_slice_is_overridable_from_the_trigger_page(self, dagbag: Any) -> None:
         # Working through a backlog by hand wants a different size from the
