@@ -37,6 +37,7 @@ from pipeline.models.db import (
     authors,
     book_authors,
     book_series,
+    book_series_sources,
     book_sources,
     book_subjects,
     books,
@@ -503,18 +504,37 @@ class CatalogueLoader:
                 if existing is None or (membership.confirmed and not existing[0].confirmed):
                     best[membership.identity_key] = (membership, candidate.source)
 
-        for membership, source in best.values():
-            series_id = self._upsert_series(connection, membership, source)
-            self._link_series(connection, book_id, series_id, membership)
+        series_ids: dict[str, int] = {}
+        for key, (membership, _source) in best.items():
+            series_ids[key] = self._upsert_series(connection, membership)
+            self._link_series(connection, book_id, series_ids[key], membership)
+
+        # Provenance is every source's own account, not the one that won.
+        #
+        # The loop above collapses the candidates to a single merged opinion
+        # per series, which is what book_series is for. That is the answer, and
+        # it cannot say who gave it — so a reader asking whether a position was
+        # stated or inferred, or whether two sources disagreed, has nothing to
+        # read. book_series_sources is where the unmerged accounts live, and
+        # until now nothing wrote to it.
+        #
+        # Only a membership carrying the source's own series id is recorded: the
+        # row keys on it, and it is also the difference between a source that
+        # named a series and one whose series was read out of a title. An
+        # inferred membership still reaches book_series, still marked
+        # unconfirmed, and simply has no provenance to show.
+        for candidate in candidates:
+            for membership in candidate.series:
+                series_id = series_ids.get(membership.identity_key)
+                if series_id is None or not membership.source_series_id:
+                    continue
+                self._record_series_source(connection, series_id, membership, candidate.source)
+                self._link_series_source(connection, book_id, series_id, membership, candidate)
 
         self._refresh_series_search_text(connection, book_id)
 
-    def _upsert_series(
-        self,
-        connection: Connection,
-        membership: CleanSeriesMembership,
-        source: SourceName,
-    ) -> int:
+    def _upsert_series(self, connection: Connection, membership: CleanSeriesMembership) -> int:
+        """The canonical series row, independent of who reported it."""
         row = connection.execute(
             insert(series)
             .values(
@@ -528,32 +548,89 @@ class CatalogueLoader:
             )
             .returning(series.c.id)
         ).one()
-        series_id = int(row.id)
+        return int(row.id)
 
-        if membership.source_series_id:
-            payload = {
-                "name": membership.name,
-                "position": str(membership.position) if membership.position else None,
-                "confirmed": membership.confirmed,
-            }
-            statement = insert(series_sources).values(
-                series_id=series_id,
-                source=source.value,
-                source_series_id=membership.source_series_id,
-                raw_payload=payload,
-                payload_hash=payload_hash(payload),
+    @staticmethod
+    def _membership_payload(membership: CleanSeriesMembership) -> dict[str, Any]:
+        """What this source said, as it said it.
+
+        ``position`` is stringified because it is a Decimal: JSON has one
+        numeric type and it is binary, so 2.5 would survive and 0.10 would not.
+        """
+        return {
+            "name": membership.name,
+            "position": str(membership.position) if membership.position is not None else None,
+            "confirmed": membership.confirmed,
+        }
+
+    def _record_series_source(
+        self,
+        connection: Connection,
+        series_id: int,
+        membership: CleanSeriesMembership,
+        source: SourceName,
+    ) -> None:
+        """The source's own series row, which the provenance row references.
+
+        Written for every source that named the series, not only the one whose
+        account won, because book_series_sources keys on it and a foreign key
+        to a row that was never written is a load failure.
+        """
+        payload = self._membership_payload(membership)
+        statement = insert(series_sources).values(
+            series_id=series_id,
+            source=source.value,
+            source_series_id=membership.source_series_id,
+            raw_payload=payload,
+            payload_hash=payload_hash(payload),
+        )
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["source", "source_series_id"],
+                set_={
+                    "series_id": statement.excluded.series_id,
+                    "raw_payload": statement.excluded.raw_payload,
+                    "payload_hash": statement.excluded.payload_hash,
+                },
             )
-            connection.execute(
-                statement.on_conflict_do_update(
-                    index_elements=["source", "source_series_id"],
-                    set_={
-                        "series_id": statement.excluded.series_id,
-                        "raw_payload": statement.excluded.raw_payload,
-                        "payload_hash": statement.excluded.payload_hash,
-                    },
-                )
+        )
+
+    def _link_series_source(
+        self,
+        connection: Connection,
+        book_id: int,
+        series_id: int,
+        membership: CleanSeriesMembership,
+        candidate: CleanBook,
+    ) -> None:
+        """One source's account of one book belonging to one series.
+
+        Never merged with another source's: the point of this row is that it
+        still says what it said after the canonical record has picked a winner.
+        """
+        payload = self._membership_payload(membership)
+        statement = insert(book_series_sources).values(
+            book_id=book_id,
+            series_id=series_id,
+            source=candidate.source.value,
+            source_book_id=candidate.source_id,
+            source_series_id=membership.source_series_id,
+            position=membership.position,
+            confirmed=membership.confirmed,
+            raw_payload=payload,
+        )
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=["source", "source_book_id", "source_series_id"],
+                set_={
+                    "book_id": statement.excluded.book_id,
+                    "series_id": statement.excluded.series_id,
+                    "position": statement.excluded.position,
+                    "confirmed": statement.excluded.confirmed,
+                    "raw_payload": statement.excluded.raw_payload,
+                },
             )
-        return series_id
+        )
 
     def _link_series(
         self,

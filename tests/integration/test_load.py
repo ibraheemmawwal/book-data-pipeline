@@ -29,6 +29,7 @@ from pipeline.models.db import authors as authors_table
 from pipeline.models.db import (
     book_authors,
     book_series,
+    book_series_sources,
     book_sources,
     book_subjects,
     books,
@@ -1043,6 +1044,207 @@ class TestRacesAndOddities:
         loader.load(engine, [openlibrary_payload("/works/OL1W", isbns=[isbn])])
 
         assert count(connection, books) == 1
+
+
+class TestMembershipProvenance:
+    """Who said this book belongs to this series, and what did they say.
+
+    ``book_series`` carries the merged answer: one position, one confirmed
+    flag, whichever account won. That is the right shape for a reader asking
+    which volume this is, and the wrong shape for every question about
+    reliability — was the position stated or read out of a title, did two
+    sources disagree, which one is this from.
+
+    ``book_series_sources`` is where the unmerged accounts live. The schema had
+    it from the first migration and nothing wrote to it, so those questions had
+    no answer and the merged row looked like the only fact there was.
+
+    Distinct from ``TestSeriesProvenance`` above, which covers ``series_sources``
+    — who named the *series*. This is who placed the *book* in it.
+
+    Only Goodreads reports series at all today, so every row here has one
+    source. The table is still what keeps that true rather than assumed: it is
+    the difference between "one source says so" and "this is so".
+    """
+
+    @staticmethod
+    def _membership(
+        source: SourceName,
+        source_id: str,
+        *,
+        series_id: str | None,
+        position: str | None,
+        isbn: str,
+    ) -> CleanBook:
+        return _clean(
+            RawBook(
+                source=source,
+                source_id=source_id,
+                title="Leviathan Wakes",
+                isbns=[isbn],
+                series=[
+                    RawSeriesMembership(
+                        name="The Expanse",
+                        position=position,
+                        confirmed=series_id is not None,
+                        source_series_id=series_id,
+                    )
+                ],
+                raw_payload={
+                    "bookId": source_id,
+                    "title": "Leviathan Wakes",
+                    "isbn13": isbn,
+                    "_detail": {
+                        "series_label": f"Book {position} in the The Expanse series"
+                        if position
+                        else "The Expanse",
+                        **({"series_id": series_id} if series_id else {}),
+                    },
+                },
+            )
+        )
+
+    def test_a_named_series_leaves_a_provenance_row(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        isbn = "9780316129114"
+        CatalogueLoader().load(
+            engine,
+            [
+                self._membership(
+                    SourceName.GOODREADS, "gr-p1", series_id="45175", position="1", isbn=isbn
+                )
+            ],
+        )
+
+        rows = connection.execute(
+            select(
+                book_series_sources.c.source,
+                book_series_sources.c.source_book_id,
+                book_series_sources.c.source_series_id,
+                book_series_sources.c.position,
+                book_series_sources.c.confirmed,
+            )
+        ).all()
+
+        assert len(rows) == 1
+        assert rows[0].source == "goodreads"
+        assert rows[0].source_book_id == "gr-p1"
+        assert rows[0].source_series_id == "45175"
+        assert rows[0].position == 1
+        assert rows[0].confirmed is True
+
+    def test_it_points_at_the_book_and_series_it_describes(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # Without this the row is unjoinable and the provenance unreadable.
+        isbn = "9780316129121"
+        CatalogueLoader().load(
+            engine,
+            [
+                self._membership(
+                    SourceName.GOODREADS, "gr-p2", series_id="45175", position="2", isbn=isbn
+                )
+            ],
+        )
+
+        canonical = connection.execute(select(book_series.c.book_id, book_series.c.series_id)).one()
+        provenance = connection.execute(
+            select(book_series_sources.c.book_id, book_series_sources.c.series_id)
+        ).one()
+
+        assert (provenance.book_id, provenance.series_id) == (
+            canonical.book_id,
+            canonical.series_id,
+        )
+
+    def test_a_series_inferred_from_a_title_has_no_provenance(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        """An unconfirmed membership is a guess, and a guess has no source.
+
+        It still reaches book_series — dropping it would lose a real signal —
+        but it is not evidence, and recording it as though a source asserted it
+        is what would make the provenance table lie.
+        """
+        isbn = "9780316129138"
+        CatalogueLoader().load(
+            engine,
+            [
+                self._membership(
+                    SourceName.GOODREADS, "gr-p3", series_id=None, position="3", isbn=isbn
+                )
+            ],
+        )
+
+        assert connection.execute(select(func.count()).select_from(book_series)).scalar_one() == 1
+        assert (
+            connection.execute(select(func.count()).select_from(book_series_sources)).scalar_one()
+            == 0
+        )
+
+    def test_two_records_disagreeing_both_survive(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        """The reason the table exists.
+
+        book_series keeps one position. If the accounts were merged here too, a
+        disagreement would be indistinguishable from a consensus, which is
+        precisely the question provenance is asked to settle.
+
+        Two Goodreads records for one book rather than two sources, because
+        Goodreads is currently the only source that reports series — and two
+        ids for one book is the ordinary case, not a contrived one: an edition
+        and a work each carry their own page.
+        """
+        isbn = "9780316129145"
+        loader = CatalogueLoader()
+        loader.load(
+            engine,
+            [
+                self._membership(
+                    SourceName.GOODREADS, "gr-p4a", series_id="45175", position="1", isbn=isbn
+                )
+            ],
+        )
+        loader.load(
+            engine,
+            [
+                self._membership(
+                    SourceName.GOODREADS, "gr-p4b", series_id="45175", position="2", isbn=isbn
+                )
+            ],
+        )
+
+        accounts = connection.execute(
+            select(book_series_sources.c.source_book_id, book_series_sources.c.position).order_by(
+                book_series_sources.c.source_book_id
+            )
+        ).all()
+
+        assert [(r.source_book_id, int(r.position)) for r in accounts] == [
+            ("gr-p4a", 1),
+            ("gr-p4b", 2),
+        ], "one record's position overwrote the other's"
+
+    def test_reloading_the_same_account_does_not_duplicate_it(
+        self, engine: Engine, connection: Connection
+    ) -> None:
+        # The row keys on (source, source_book_id, source_series_id), so a
+        # re-run has to update in place rather than accumulate history.
+        isbn = "9780316129152"
+        loader = CatalogueLoader()
+        record = self._membership(
+            SourceName.GOODREADS, "gr-p5", series_id="45175", position="1", isbn=isbn
+        )
+        loader.load(engine, [record])
+        loader.load(engine, [record])
+
+        count = connection.execute(
+            select(func.count()).select_from(book_series_sources)
+        ).scalar_one()
+
+        assert count == 1
 
 
 class TestAMergeKeepsTheSeries:
